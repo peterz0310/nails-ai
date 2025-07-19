@@ -7,6 +7,7 @@ import {
   processYoloOutput,
   preprocessImageForYolo,
   YoloDetection,
+  applyNailColorFilter,
 } from "../utils/yolo";
 
 interface WebcamCaptureProps {
@@ -30,6 +31,14 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   const lastInferenceTimeRef = useRef<number>(0);
   const capturedFrameRef = useRef<HTMLCanvasElement | null>(null);
   const syncedDetectionsRef = useRef<YoloDetection[]>([]);
+  const [selectedColor, setSelectedColor] = useState({
+    r: 255,
+    g: 107,
+    b: 157,
+    a: 0.6,
+  }); // Default pink
+  const [showColorPicker, setShowColorPicker] = useState(false);
+  const [enableColorFilter, setEnableColorFilter] = useState(false);
 
   // Load the model
   const loadModel = useCallback(async () => {
@@ -279,7 +288,27 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       });
     }
 
-    // Draw detections on top of the captured frame
+    // Apply color filter if enabled
+    if (enableColorFilter && currentDetections.length > 0) {
+      // Scale detections to display size
+      const scaledDetections = currentDetections.map((detection) => ({
+        ...detection,
+        bbox: [
+          detection.bbox[0] * scaleX,
+          detection.bbox[1] * scaleY,
+          detection.bbox[2] * scaleX,
+          detection.bbox[3] * scaleY,
+        ],
+        maskPolygon: detection.maskPolygon?.map((point) => [
+          point[0] * scaleX,
+          point[1] * scaleY,
+        ]),
+      }));
+
+      applyNailColorFilter(canvas, scaledDetections, selectedColor);
+    }
+
+    // Draw detection outlines and labels
     currentDetections.forEach((detection, index) => {
       const [x, y, width, height] = detection.bbox;
 
@@ -313,11 +342,47 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
         return;
       }
 
-      // Draw bounding box with nail-themed styling
-      ctx.strokeStyle = "#ff6b9d"; // Pink color for nails
-      ctx.lineWidth = 3;
-      ctx.setLineDash([]);
-      ctx.strokeRect(clampedX, clampedY, clampedWidth, clampedHeight);
+      // Draw precise boundary if available
+      if (detection.maskPolygon && detection.maskPolygon.length > 2) {
+        // Draw precise mask polygon outline
+        ctx.strokeStyle = "#ff6b9d";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([]);
+
+        ctx.beginPath();
+        const firstPoint = detection.maskPolygon[0];
+        ctx.moveTo(firstPoint[0] * scaleX, firstPoint[1] * scaleY);
+
+        for (let i = 1; i < detection.maskPolygon.length; i++) {
+          const point = detection.maskPolygon[i];
+          ctx.lineTo(point[0] * scaleX, point[1] * scaleY);
+        }
+
+        ctx.closePath();
+        ctx.stroke();
+
+        // Optional: draw semi-transparent fill
+        if (!enableColorFilter) {
+          ctx.fillStyle = "rgba(255, 107, 157, 0.2)";
+          ctx.fill();
+        }
+      } else {
+        // Fallback to enhanced bounding box with nail-like shape
+        const radius = Math.min(clampedWidth, clampedHeight) * 0.3;
+
+        ctx.strokeStyle = "#ff6b9d";
+        ctx.lineWidth = 3;
+        ctx.setLineDash([]);
+
+        ctx.beginPath();
+        ctx.roundRect(clampedX, clampedY, clampedWidth, clampedHeight, radius);
+        ctx.stroke();
+
+        if (!enableColorFilter) {
+          ctx.fillStyle = "rgba(255, 107, 157, 0.2)";
+          ctx.fill();
+        }
+      }
 
       // Draw filled background for label
       const label = `Nail ${(detection.score * 100).toFixed(1)}%`;
@@ -345,7 +410,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       ctx.fillStyle = "white";
       ctx.fillText(label, labelX + 5, labelY - 5);
 
-      // Draw corner indicators
+      // Draw corner indicators for enhanced UI
       const cornerSize = Math.min(15, clampedWidth / 4, clampedHeight / 4);
       ctx.strokeStyle = "#ff6b9d";
       ctx.lineWidth = 2;
@@ -384,7 +449,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       );
       ctx.stroke();
     });
-  }, []);
+  }, [enableColorFilter, selectedColor]);
 
   // Main processing loop
   const processFrame = useCallback(() => {
@@ -407,6 +472,23 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   useEffect(() => {
     loadModel();
   }, [loadModel]);
+
+  // Close color picker when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        showColorPicker &&
+        !(event.target as Element)?.closest(".color-picker-container")
+      ) {
+        setShowColorPicker(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [showColorPicker]);
 
   // Set up resize observer to handle canvas resizing
   useEffect(() => {
@@ -528,6 +610,123 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
             {isWebcamActive ? "🛑 Stop Camera" : "📷 Start Camera"}
           </button>
 
+          {/* Color Filter Toggle */}
+          <button
+            onClick={() => setEnableColorFilter(!enableColorFilter)}
+            disabled={!isWebcamActive || detections.length === 0}
+            className={`px-6 py-2 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+              enableColorFilter
+                ? "bg-purple-500 hover:bg-purple-600 text-white"
+                : "bg-gray-500 hover:bg-gray-600 text-white"
+            }`}
+          >
+            {enableColorFilter ? "🎨 Color Filter ON" : "🎨 Color Filter OFF"}
+          </button>
+
+          {/* Color Picker */}
+          {enableColorFilter && (
+            <div className="relative color-picker-container">
+              <button
+                onClick={() => setShowColorPicker(!showColorPicker)}
+                className="px-4 py-2 rounded-lg font-medium bg-white border-2 border-gray-300 hover:border-gray-400 transition-colors flex items-center gap-2"
+              >
+                <div
+                  className="w-6 h-6 rounded border-2 border-gray-300"
+                  style={{
+                    backgroundColor: `rgba(${selectedColor.r}, ${selectedColor.g}, ${selectedColor.b}, 1)`,
+                  }}
+                ></div>
+                Pick Color
+              </button>
+
+              {showColorPicker && (
+                <div className="absolute top-12 left-0 z-10 bg-white rounded-lg shadow-lg border p-4 min-w-[300px]">
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Nail Color
+                      </label>
+                      <div className="grid grid-cols-6 gap-2">
+                        {/* Predefined nail colors */}
+                        {[
+                          { name: "Classic Red", r: 220, g: 20, b: 60 },
+                          { name: "Pink", r: 255, g: 107, b: 157 },
+                          { name: "Coral", r: 255, g: 127, b: 80 },
+                          { name: "Purple", r: 138, g: 43, b: 226 },
+                          { name: "Blue", r: 30, g: 144, b: 255 },
+                          { name: "Green", r: 50, g: 205, b: 50 },
+                          { name: "Gold", r: 255, g: 215, b: 0 },
+                          { name: "Silver", r: 192, g: 192, b: 192 },
+                          { name: "Black", r: 0, g: 0, b: 0 },
+                          { name: "White", r: 255, g: 255, b: 255 },
+                          { name: "Orange", r: 255, g: 165, b: 0 },
+                          { name: "Turquoise", r: 64, g: 224, b: 208 },
+                        ].map((color, index) => (
+                          <button
+                            key={index}
+                            onClick={() =>
+                              setSelectedColor({ ...color, a: selectedColor.a })
+                            }
+                            className={`w-8 h-8 rounded border-2 hover:scale-110 transition-transform ${
+                              selectedColor.r === color.r &&
+                              selectedColor.g === color.g &&
+                              selectedColor.b === color.b
+                                ? "border-gray-800"
+                                : "border-gray-300"
+                            }`}
+                            style={{
+                              backgroundColor: `rgb(${color.r}, ${color.g}, ${color.b})`,
+                            }}
+                            title={color.name}
+                          />
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Opacity Slider */}
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Opacity: {Math.round(selectedColor.a * 100)}%
+                      </label>
+                      <input
+                        type="range"
+                        min="0.1"
+                        max="1"
+                        step="0.1"
+                        value={selectedColor.a}
+                        onChange={(e) =>
+                          setSelectedColor({
+                            ...selectedColor,
+                            a: parseFloat(e.target.value),
+                          })
+                        }
+                        className="w-full"
+                      />
+                    </div>
+
+                    {/* Preview */}
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-700">Preview:</span>
+                      <div
+                        className="w-16 h-8 rounded border"
+                        style={{
+                          backgroundColor: `rgba(${selectedColor.r}, ${selectedColor.g}, ${selectedColor.b}, ${selectedColor.a})`,
+                        }}
+                      ></div>
+                    </div>
+
+                    <button
+                      onClick={() => setShowColorPicker(false)}
+                      className="w-full px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition-colors"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {isProcessing && (
             <div className="flex items-center gap-2 text-pink-600">
               <div className="animate-spin w-4 h-4 border-2 border-pink-600 border-t-transparent rounded-full"></div>
@@ -538,7 +737,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
 
         {/* Stats */}
         {isWebcamActive && (
-          <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
+          <div className="mt-4 grid grid-cols-2 md:grid-cols-5 gap-4 text-center">
             <div className="bg-pink-50 rounded-lg p-3">
               <div className="text-2xl font-bold text-pink-600">
                 {detections.length}
@@ -563,8 +762,16 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
               <div className="text-sm text-gray-600">FPS</div>
             </div>
             <div className="bg-orange-50 rounded-lg p-3">
-              <div className="text-2xl font-bold text-orange-600">YOLOv8</div>
-              <div className="text-sm text-gray-600">Model</div>
+              <div className="text-2xl font-bold text-orange-600">
+                {detections.some((d) => d.maskPolygon) ? "✓" : "○"}
+              </div>
+              <div className="text-sm text-gray-600">Precise Bounds</div>
+            </div>
+            <div className="bg-green-50 rounded-lg p-3">
+              <div className="text-2xl font-bold text-green-600">
+                {enableColorFilter ? "ON" : "OFF"}
+              </div>
+              <div className="text-sm text-gray-600">Color Filter</div>
             </div>
           </div>
         )}
@@ -577,12 +784,34 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
               {detections.map((detection, index) => (
                 <div
                   key={index}
-                  className="text-sm bg-gray-50 rounded p-2 flex justify-between"
+                  className="text-sm bg-gray-50 rounded p-2 flex justify-between items-center"
                 >
-                  <span>Nail #{index + 1}</span>
-                  <span className="font-medium text-pink-600">
-                    {(detection.score * 100).toFixed(1)}% confidence
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span>Nail #{index + 1}</span>
+                    {detection.maskPolygon && (
+                      <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded">
+                        Precise
+                      </span>
+                    )}
+                    {detection.mask && (
+                      <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded">
+                        Mask
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-pink-600">
+                      {(detection.score * 100).toFixed(1)}%
+                    </span>
+                    {enableColorFilter && (
+                      <div
+                        className="w-4 h-4 rounded border"
+                        style={{
+                          backgroundColor: `rgba(${selectedColor.r}, ${selectedColor.g}, ${selectedColor.b}, 1)`,
+                        }}
+                      ></div>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
