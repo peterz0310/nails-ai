@@ -140,6 +140,14 @@ export function processYoloOutput(
               maskCoeffs.push(predictionData[coeffIndex]);
             }
           }
+
+          // Log mask coefficients for debugging
+          if (maskCoeffs.length > 0) {
+            console.log(
+              `Detection ${i} mask coefficients:`,
+              maskCoeffs.slice(0, Math.min(5, maskCoeffs.length))
+            );
+          }
         }
 
         validDetections.push({
@@ -253,7 +261,7 @@ function processMasks(
  */
 function generateMaskFromCoeffs(
   coeffs: number[],
-  prototypes: tf.Tensor,
+  prototypes: tf.Tensor | null,
   bbox: number[],
   inputWidth: number,
   inputHeight: number
@@ -265,8 +273,9 @@ function generateMaskFromCoeffs(
   try {
     const [bboxX, bboxY, bboxWidth, bboxHeight] = bbox;
 
-    // If we have mask coefficients and prototypes, use them
+    // If we have mask coefficients and prototypes, use them for precise mask generation
     if (coeffs.length > 0 && prototypes) {
+      console.log("Using actual mask coefficients for precise segmentation");
       return generateActualMask(
         coeffs,
         prototypes,
@@ -275,6 +284,8 @@ function generateMaskFromCoeffs(
         inputHeight
       );
     }
+
+    console.log("Falling back to shape-based mask generation");
 
     // Fallback: Create a more realistic nail-shaped mask
     const maskSize = 64; // Higher resolution for better detail
@@ -397,9 +408,76 @@ function generateActualMask(
   imageData: ImageData | null;
 } {
   try {
-    // This is where we would implement the actual mask generation
-    // using the mask coefficients and prototypes from the YOLOv8 model
-    // For now, we'll use the improved fallback
+    if (!prototypes || coeffs.length === 0) {
+      throw new Error("No prototypes or coefficients available");
+    }
+
+    const [bboxX, bboxY, bboxWidth, bboxHeight] = bbox;
+
+    // Get mask dimensions from prototypes shape
+    const maskHeight = prototypes.shape[2] || 160;
+    const maskWidth = prototypes.shape[3] || 160;
+    const numPrototypes = prototypes.shape[1] || coeffs.length;
+
+    console.log(
+      `Generating mask: prototypes shape: ${prototypes.shape}, coeffs length: ${coeffs.length}`
+    );
+
+    // Create coefficients tensor
+    const coeffsTensor = tf.tensor1d(coeffs.slice(0, numPrototypes));
+
+    // Get prototypes data and reshape for matrix multiplication
+    const prototypesData = prototypes.dataSync();
+    const prototypesTensor = tf.tensor3d(Array.from(prototypesData), [
+      numPrototypes,
+      maskHeight,
+      maskWidth,
+    ]);
+
+    // Perform matrix multiplication: coeffs × prototypes
+    const maskTensor = tf.einsum("i,ihw->hw", coeffsTensor, prototypesTensor);
+
+    // Apply sigmoid activation to get mask probabilities
+    const sigmoidMask = tf.sigmoid(maskTensor);
+
+    // Get the mask data
+    const maskData = sigmoidMask.dataSync();
+
+    // Convert to 2D array
+    const mask2D: number[][] = [];
+    for (let y = 0; y < maskHeight; y++) {
+      const row: number[] = [];
+      for (let x = 0; x < maskWidth; x++) {
+        row.push(maskData[y * maskWidth + x]);
+      }
+      mask2D.push(row);
+    }
+
+    // Generate polygon from the precise mask
+    const polygon = extractPolygonFromMask(
+      mask2D,
+      bbox,
+      inputWidth,
+      inputHeight,
+      0.5 // Higher threshold for more precise boundaries
+    );
+
+    console.log(`Generated mask with ${polygon.length} polygon points`);
+
+    // Clean up tensors
+    coeffsTensor.dispose();
+    prototypesTensor.dispose();
+    maskTensor.dispose();
+    sigmoidMask.dispose();
+
+    return {
+      mask: mask2D,
+      polygon: polygon,
+      imageData: null,
+    };
+  } catch (error) {
+    console.error("Error generating actual mask:", error);
+    // Fallback to the improved shape-based approach
     return generateMaskFromCoeffs(
       [],
       null as any,
@@ -407,13 +485,6 @@ function generateActualMask(
       inputWidth,
       inputHeight
     );
-  } catch (error) {
-    console.error("Error generating actual mask:", error);
-    return {
-      mask: [],
-      polygon: [],
-      imageData: null,
-    };
   }
 }
 
@@ -425,7 +496,7 @@ function extractPolygonFromMask(
   bbox: number[],
   inputWidth: number,
   inputHeight: number,
-  threshold: number = 0.3
+  threshold: number = 0.5
 ): number[][] {
   const [bboxX, bboxY, bboxWidth, bboxHeight] = bbox;
   const maskHeight = mask.length;
@@ -433,40 +504,133 @@ function extractPolygonFromMask(
 
   if (maskHeight === 0 || maskWidth === 0) return [];
 
-  const points: number[][] = [];
+  // Find all edge points using Marching Squares-like algorithm
+  const edgePoints: number[][] = [];
 
-  // Find contour points by tracing the edge of the mask
-  for (let y = 0; y < maskHeight; y++) {
-    for (let x = 0; x < maskWidth; x++) {
-      if (mask[y][x] > threshold) {
-        // Check if this is an edge pixel
-        const isEdge =
-          x === 0 ||
-          x === maskWidth - 1 ||
-          y === 0 ||
-          y === maskHeight - 1 ||
-          (mask[y - 1]?.[x] || 0) <= threshold ||
-          (mask[y + 1]?.[x] || 0) <= threshold ||
-          (mask[y][x - 1] || 0) <= threshold ||
-          (mask[y][x + 1] || 0) <= threshold;
+  for (let y = 0; y < maskHeight - 1; y++) {
+    for (let x = 0; x < maskWidth - 1; x++) {
+      // Get the 2x2 cell values
+      const topLeft = mask[y][x] > threshold ? 1 : 0;
+      const topRight = mask[y][x + 1] > threshold ? 1 : 0;
+      const bottomLeft = mask[y + 1][x] > threshold ? 1 : 0;
+      const bottomRight = mask[y + 1][x + 1] > threshold ? 1 : 0;
 
-        if (isEdge) {
-          // Convert mask coordinates to image coordinates
-          const imageX = bboxX + (x / maskWidth) * bboxWidth;
-          const imageY = bboxY + (y / maskHeight) * bboxHeight;
-          points.push([imageX, imageY]);
+      // Create a configuration index (0-15)
+      const config =
+        (topLeft << 3) | (topRight << 2) | (bottomRight << 1) | bottomLeft;
+
+      // Add edge points based on configuration
+      const cellPoints = getMarchingSquarePoints(
+        x,
+        y,
+        config,
+        maskWidth,
+        maskHeight
+      );
+      edgePoints.push(...cellPoints);
+    }
+  }
+
+  if (edgePoints.length === 0) {
+    // Fallback: find outer boundary points
+    for (let y = 0; y < maskHeight; y++) {
+      for (let x = 0; x < maskWidth; x++) {
+        if (mask[y][x] > threshold) {
+          // Check if this is a boundary pixel
+          const isBoundary =
+            x === 0 ||
+            x === maskWidth - 1 ||
+            y === 0 ||
+            y === maskHeight - 1 ||
+            (mask[y - 1]?.[x] || 0) <= threshold ||
+            (mask[y + 1]?.[x] || 0) <= threshold ||
+            (mask[y][x - 1] || 0) <= threshold ||
+            (mask[y][x + 1] || 0) <= threshold;
+
+          if (isBoundary) {
+            edgePoints.push([x, y]);
+          }
         }
       }
     }
   }
 
-  // Sort points to create a proper polygon outline
-  if (points.length > 0) {
-    const sortedPoints = sortPointsForPolygon(points);
-    return simplifyPolygon(sortedPoints, 3.0);
+  // Convert mask coordinates to image coordinates
+  const imagePoints = edgePoints.map(([x, y]) => {
+    const imageX = bboxX + (x / maskWidth) * bboxWidth;
+    const imageY = bboxY + (y / maskHeight) * bboxHeight;
+    return [imageX, imageY];
+  });
+
+  // Sort and simplify the polygon
+  if (imagePoints.length > 0) {
+    const sortedPoints = sortPointsForPolygon(imagePoints);
+    return simplifyPolygon(sortedPoints, 2.0); // Tighter tolerance for more precision
   }
 
   return [];
+}
+
+/**
+ * Get edge points for marching squares algorithm
+ */
+function getMarchingSquarePoints(
+  x: number,
+  y: number,
+  config: number,
+  maskWidth: number,
+  maskHeight: number
+): number[][] {
+  const points: number[][] = [];
+
+  // Marching squares lookup table for edge intersections
+  // Each configuration defines which edges have intersections
+  const edgeTable: number[][][] = [
+    [], // 0: no intersections
+    [[0, 3]], // 1: bottom-left
+    [[1, 2]], // 2: bottom-right
+    [[0, 2]], // 3: bottom edge
+    [[2, 1]], // 4: top-right
+    [
+      [0, 3],
+      [2, 1],
+    ], // 5: diagonal
+    [[3, 1]], // 6: right edge
+    [[0, 1]], // 7: bottom-right corner
+    [[3, 0]], // 8: top-left
+    [[1, 3]], // 9: left edge
+    [
+      [3, 0],
+      [1, 2],
+    ], // 10: diagonal
+    [[1, 2]], // 11: top-left corner
+    [[2, 0]], // 12: top edge
+    [[1, 0]], // 13: top-right corner
+    [[3, 2]], // 14: top-left corner
+    [], // 15: no intersections
+  ];
+
+  const edges = edgeTable[config] || [];
+
+  for (const edge of edges) {
+    if (edge.length >= 2) {
+      const [start, end] = edge;
+      // Calculate intersection points on cell edges
+      // 0=top, 1=right, 2=bottom, 3=left
+      const intersections = [
+        [x + 0.5, y], // top edge
+        [x + 1, y + 0.5], // right edge
+        [x + 0.5, y + 1], // bottom edge
+        [x, y + 0.5], // left edge
+      ];
+
+      if (start < intersections.length && end < intersections.length) {
+        points.push(intersections[start], intersections[end]);
+      }
+    }
+  }
+
+  return points;
 }
 
 /**
@@ -491,7 +655,7 @@ function sortPointsForPolygon(points: number[][]): number[][] {
  * Simplify polygon by removing points that are too close
  */
 function simplifyPolygon(points: number[][], tolerance: number): number[][] {
-  if (points.length <= 2) return points;
+  if (points.length <= 3) return points;
 
   const simplified: number[][] = [points[0]];
 
@@ -509,7 +673,22 @@ function simplifyPolygon(points: number[][], tolerance: number): number[][] {
     }
   }
 
-  return simplified;
+  // Ensure the polygon is closed and has enough points for a good shape
+  if (simplified.length > 2) {
+    const firstPoint = simplified[0];
+    const lastPoint = simplified[simplified.length - 1];
+    const closingDistance = Math.sqrt(
+      Math.pow(lastPoint[0] - firstPoint[0], 2) +
+        Math.pow(lastPoint[1] - firstPoint[1], 2)
+    );
+
+    // Only add closing point if it's not too close to the first point
+    if (closingDistance > tolerance) {
+      simplified.push(firstPoint);
+    }
+  }
+
+  return simplified.length >= 3 ? simplified : points;
 }
 
 /**
@@ -606,48 +785,92 @@ export function applyNailColorFilter(
   ctx.save();
 
   detections.forEach((detection) => {
-    // Always prefer polygon rendering when available as it avoids gray backgrounds
-    if (detection.maskPolygon && detection.maskPolygon.length > 2) {
-      // Use polygon outline with proper color blending
-      ctx.globalCompositeOperation = "source-over";
-      ctx.fillStyle = `rgba(${color.r}, ${color.g}, ${color.b}, ${
-        color.a * 0.7
-      })`;
-      ctx.beginPath();
-      ctx.moveTo(detection.maskPolygon[0][0], detection.maskPolygon[0][1]);
-
-      for (let i = 1; i < detection.maskPolygon.length; i++) {
-        ctx.lineTo(detection.maskPolygon[i][0], detection.maskPolygon[i][1]);
-      }
-
-      ctx.closePath();
-      ctx.fill();
-
-      // Add subtle highlight
-      const [bboxX, bboxY, bboxWidth, bboxHeight] = detection.bbox;
-      const gradient = ctx.createLinearGradient(
-        bboxX,
-        bboxY,
-        bboxX,
-        bboxY + bboxHeight
-      );
-      gradient.addColorStop(0, `rgba(255, 255, 255, ${color.a * 0.15})`);
-      gradient.addColorStop(0.5, `rgba(255, 255, 255, ${color.a * 0.05})`);
-      gradient.addColorStop(1, `rgba(0, 0, 0, ${color.a * 0.02})`);
-
-      ctx.fillStyle = gradient;
-      ctx.fill();
+    // Always prefer polygon rendering when available for maximum precision
+    if (detection.maskPolygon && detection.maskPolygon.length > 3) {
+      // Use precise polygon outline with smooth curves
+      applyPrecisePolygonColor(ctx, detection, color);
     } else if (detection.mask && detection.mask.length > 0) {
       // Use the mask data if polygon is not available
       applyMaskBasedColor(ctx, detection, color);
     } else {
-      // Fallback to improved nail shape
+      // Fallback to improved nail shape (should rarely be used now)
       applyNailShapeColor(ctx, detection, color);
     }
   });
 
   // Restore the previous state
   ctx.restore();
+}
+
+/**
+ * Apply color using precise polygon with smooth rendering
+ */
+function applyPrecisePolygonColor(
+  ctx: CanvasRenderingContext2D,
+  detection: YoloDetection,
+  color: { r: number; g: number; b: number; a: number }
+): void {
+  const polygon = detection.maskPolygon!;
+  const [bboxX, bboxY, bboxWidth, bboxHeight] = detection.bbox;
+
+  // Enable anti-aliasing for smoother edges
+  ctx.imageSmoothingEnabled = true;
+  ctx.globalCompositeOperation = "source-over";
+
+  // Create the main nail color
+  ctx.fillStyle = `rgba(${color.r}, ${color.g}, ${color.b}, ${color.a * 0.8})`;
+
+  ctx.beginPath();
+  if (polygon.length > 0) {
+    ctx.moveTo(polygon[0][0], polygon[0][1]);
+
+    // Use quadratic curves for smoother polygon edges
+    for (let i = 1; i < polygon.length; i++) {
+      const current = polygon[i];
+      const next = polygon[(i + 1) % polygon.length];
+
+      // Calculate control point for smooth curve
+      const controlX = (current[0] + next[0]) / 2;
+      const controlY = (current[1] + next[1]) / 2;
+
+      if (i === polygon.length - 1) {
+        // Close the path smoothly
+        ctx.quadraticCurveTo(
+          current[0],
+          current[1],
+          polygon[0][0],
+          polygon[0][1]
+        );
+      } else {
+        ctx.quadraticCurveTo(current[0], current[1], controlX, controlY);
+      }
+    }
+  }
+
+  ctx.closePath();
+  ctx.fill();
+
+  // Add subtle gradient highlight for realism
+  const gradient = ctx.createRadialGradient(
+    bboxX + bboxWidth * 0.3, // Offset highlight position
+    bboxY + bboxHeight * 0.2,
+    0,
+    bboxX + bboxWidth / 2,
+    bboxY + bboxHeight / 2,
+    Math.max(bboxWidth, bboxHeight) * 0.7
+  );
+
+  gradient.addColorStop(0, `rgba(255, 255, 255, ${color.a * 0.25})`);
+  gradient.addColorStop(0.4, `rgba(255, 255, 255, ${color.a * 0.1})`);
+  gradient.addColorStop(1, `rgba(0, 0, 0, ${color.a * 0.05})`);
+
+  ctx.fillStyle = gradient;
+  ctx.fill();
+
+  // Add a subtle shadow/depth effect
+  ctx.strokeStyle = `rgba(0, 0, 0, ${color.a * 0.15})`;
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
 }
 
 /**
