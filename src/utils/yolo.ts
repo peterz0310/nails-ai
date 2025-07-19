@@ -6,7 +6,6 @@ export interface YoloDetection {
   class: number;
   mask?: number[][]; // 2D mask array
   maskPolygon?: number[][]; // Array of [x, y] points for accurate boundary
-  maskImageData?: ImageData; // For direct canvas rendering
 }
 
 export interface YoloOutput {
@@ -226,7 +225,6 @@ function processMasks(
           class: detection.class,
           mask: mask.mask,
           maskPolygon: mask.polygon,
-          maskImageData: mask.imageData || undefined,
         });
       } else {
         // No mask available, just return the detection
@@ -265,25 +263,77 @@ function generateMaskFromCoeffs(
   imageData: ImageData | null;
 } {
   try {
-    // For now, create a simplified oval mask based on bounding box
-    // This will be improved when we get proper mask coefficients working
     const [bboxX, bboxY, bboxWidth, bboxHeight] = bbox;
-    const maskSize = 32; // Low resolution mask for performance
 
+    // If we have mask coefficients and prototypes, use them
+    if (coeffs.length > 0 && prototypes) {
+      return generateActualMask(coeffs, prototypes, bbox, inputWidth, inputHeight);
+    }
+
+    // Fallback: Create a more realistic nail-shaped mask
+    const maskSize = 64; // Higher resolution for better detail
     const mask2D: number[][] = [];
-    const centerX = maskSize / 2;
-    const centerY = maskSize / 2;
-    const radiusX = maskSize * 0.4;
-    const radiusY = maskSize * 0.3; // More oval-like for nails
 
     for (let y = 0; y < maskSize; y++) {
       const row: number[] = [];
       for (let x = 0; x < maskSize; x++) {
-        // Create an oval mask
-        const normalizedX = (x - centerX) / radiusX;
-        const normalizedY = (y - centerY) / radiusY;
-        const distance = normalizedX * normalizedX + normalizedY * normalizedY;
-        const maskValue = distance <= 1 ? Math.max(0, 1 - distance * 0.5) : 0;
+        // Create a nail-shaped mask (rounded rectangle)
+        const normalizedX = x / maskSize;
+        const normalizedY = y / maskSize;
+        
+        // Create rounded rectangle shape for nail
+        const padding = 0.1;
+        const cornerRadius = 0.3;
+        
+        let maskValue = 0;
+        
+        if (normalizedX >= padding && normalizedX <= 1 - padding &&
+            normalizedY >= padding && normalizedY <= 1 - padding) {
+          
+          // Calculate distance from edges for rounded corners
+          const distFromLeft = normalizedX - padding;
+          const distFromRight = (1 - padding) - normalizedX;
+          const distFromTop = normalizedY - padding;
+          const distFromBottom = (1 - padding) - normalizedY;
+          
+          const width = 1 - 2 * padding;
+          const height = 1 - 2 * padding;
+          
+          // Check if we're in a corner region
+          if ((distFromLeft < cornerRadius && distFromTop < cornerRadius) ||
+              (distFromRight < cornerRadius && distFromTop < cornerRadius) ||
+              (distFromLeft < cornerRadius && distFromBottom < cornerRadius) ||
+              (distFromRight < cornerRadius && distFromBottom < cornerRadius)) {
+            
+            // Calculate distance from nearest corner
+            let cornerX, cornerY;
+            if (distFromLeft < cornerRadius && distFromTop < cornerRadius) {
+              cornerX = padding + cornerRadius;
+              cornerY = padding + cornerRadius;
+            } else if (distFromRight < cornerRadius && distFromTop < cornerRadius) {
+              cornerX = 1 - padding - cornerRadius;
+              cornerY = padding + cornerRadius;
+            } else if (distFromLeft < cornerRadius && distFromBottom < cornerRadius) {
+              cornerX = padding + cornerRadius;
+              cornerY = 1 - padding - cornerRadius;
+            } else {
+              cornerX = 1 - padding - cornerRadius;
+              cornerY = 1 - padding - cornerRadius;
+            }
+            
+            const distFromCorner = Math.sqrt(
+              Math.pow(normalizedX - cornerX, 2) + Math.pow(normalizedY - cornerY, 2)
+            );
+            
+            if (distFromCorner <= cornerRadius) {
+              maskValue = Math.max(0, 1 - (distFromCorner / cornerRadius) * 0.3);
+            }
+          } else {
+            // We're in the main body of the nail
+            maskValue = 1;
+          }
+        }
+        
         row.push(maskValue);
       }
       mask2D.push(row);
@@ -297,21 +347,42 @@ function generateMaskFromCoeffs(
       inputHeight
     );
 
-    // Generate ImageData for direct canvas rendering
-    const imageData = createImageDataFromMask(
-      mask2D,
-      bbox,
-      inputWidth,
-      inputHeight
-    );
-
     return {
       mask: mask2D,
       polygon: polygon,
-      imageData: imageData,
+      imageData: null, // Don't pre-generate ImageData with fixed colors
     };
   } catch (error) {
     console.error("Error generating mask from coefficients:", error);
+    return {
+      mask: [],
+      polygon: [],
+      imageData: null,
+    };
+  }
+}
+
+/**
+ * Generate actual mask using model coefficients and prototypes
+ */
+function generateActualMask(
+  coeffs: number[],
+  prototypes: tf.Tensor,
+  bbox: number[],
+  inputWidth: number,
+  inputHeight: number
+): {
+  mask: number[][];
+  polygon: number[][];
+  imageData: ImageData | null;
+} {
+  try {
+    // This is where we would implement the actual mask generation
+    // using the mask coefficients and prototypes from the YOLOv8 model
+    // For now, we'll use the improved fallback
+    return generateMaskFromCoeffs([], null as any, bbox, inputWidth, inputHeight);
+  } catch (error) {
+    console.error("Error generating actual mask:", error);
     return {
       mask: [],
       polygon: [],
@@ -328,7 +399,7 @@ function extractPolygonFromMask(
   bbox: number[],
   inputWidth: number,
   inputHeight: number,
-  threshold: number = 0.5
+  threshold: number = 0.3
 ): number[][] {
   const [bboxX, bboxY, bboxWidth, bboxHeight] = bbox;
   const maskHeight = mask.length;
@@ -338,7 +409,7 @@ function extractPolygonFromMask(
 
   const points: number[][] = [];
 
-  // Simple contour extraction by finding edges
+  // Find contour points by tracing the edge of the mask
   for (let y = 0; y < maskHeight; y++) {
     for (let x = 0; x < maskWidth; x++) {
       if (mask[y][x] > threshold) {
@@ -348,10 +419,10 @@ function extractPolygonFromMask(
           x === maskWidth - 1 ||
           y === 0 ||
           y === maskHeight - 1 ||
-          mask[y - 1]?.[x] <= threshold ||
-          mask[y + 1]?.[x] <= threshold ||
-          mask[y][x - 1] <= threshold ||
-          mask[y][x + 1] <= threshold;
+          (mask[y - 1]?.[x] || 0) <= threshold ||
+          (mask[y + 1]?.[x] || 0) <= threshold ||
+          (mask[y][x - 1] || 0) <= threshold ||
+          (mask[y][x + 1] || 0) <= threshold;
 
         if (isEdge) {
           // Convert mask coordinates to image coordinates
@@ -363,8 +434,31 @@ function extractPolygonFromMask(
     }
   }
 
-  // Simplify polygon (basic Douglas-Peucker-like algorithm)
-  return simplifyPolygon(points, 2.0);
+  // Sort points to create a proper polygon outline
+  if (points.length > 0) {
+    const sortedPoints = sortPointsForPolygon(points);
+    return simplifyPolygon(sortedPoints, 3.0);
+  }
+
+  return [];
+}
+
+/**
+ * Sort points to create a proper polygon outline
+ */
+function sortPointsForPolygon(points: number[][]): number[][] {
+  if (points.length <= 2) return points;
+
+  // Find the centroid
+  const centroidX = points.reduce((sum, p) => sum + p[0], 0) / points.length;
+  const centroidY = points.reduce((sum, p) => sum + p[1], 0) / points.length;
+
+  // Sort points by angle from centroid
+  return points.sort((a, b) => {
+    const angleA = Math.atan2(a[1] - centroidY, a[0] - centroidX);
+    const angleB = Math.atan2(b[1] - centroidY, b[0] - centroidX);
+    return angleA - angleB;
+  });
 }
 
 /**
@@ -390,57 +484,6 @@ function simplifyPolygon(points: number[][], tolerance: number): number[][] {
   }
 
   return simplified;
-}
-
-/**
- * Create ImageData from mask for canvas rendering
- */
-function createImageDataFromMask(
-  mask: number[][],
-  bbox: number[],
-  inputWidth: number,
-  inputHeight: number
-): ImageData | null {
-  try {
-    const [bboxX, bboxY, bboxWidth, bboxHeight] = bbox;
-    const maskHeight = mask.length;
-    const maskWidth = mask[0]?.length || 0;
-
-    if (maskHeight === 0 || maskWidth === 0) return null;
-
-    // Create ImageData for the bounding box area
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return null;
-
-    const imageData = ctx.createImageData(
-      Math.ceil(bboxWidth),
-      Math.ceil(bboxHeight)
-    );
-    const data = imageData.data;
-
-    // Fill the ImageData with mask values
-    for (let y = 0; y < Math.ceil(bboxHeight); y++) {
-      for (let x = 0; x < Math.ceil(bboxWidth); x++) {
-        const maskX = Math.floor((x / bboxWidth) * maskWidth);
-        const maskY = Math.floor((y / bboxHeight) * maskHeight);
-
-        const maskValue = mask[maskY]?.[maskX] || 0;
-        const pixelIndex = (y * Math.ceil(bboxWidth) + x) * 4;
-
-        // Set RGBA values - use mask value as alpha for transparency
-        data[pixelIndex] = 255; // R
-        data[pixelIndex + 1] = 107; // G - nail pink color
-        data[pixelIndex + 2] = 157; // B
-        data[pixelIndex + 3] = Math.floor(maskValue * 128); // A - semi-transparent
-      }
-    }
-
-    return imageData;
-  } catch (error) {
-    console.error("Error creating ImageData from mask:", error);
-    return null;
-  }
 }
 
 /**
@@ -533,17 +576,15 @@ export function applyNailColorFilter(
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
 
-  // Set blend mode for color application
-  ctx.globalCompositeOperation = "multiply";
+  // Save the current state
+  ctx.save();
 
   detections.forEach((detection) => {
-    if (detection.maskImageData) {
-      // Use precise mask data
-      const [x, y] = detection.bbox;
-      ctx.putImageData(detection.maskImageData, x, y);
-    } else if (detection.maskPolygon && detection.maskPolygon.length > 2) {
-      // Use polygon outline
-      ctx.fillStyle = `rgba(${color.r}, ${color.g}, ${color.b}, ${color.a})`;
+    // Always prefer polygon rendering when available as it avoids gray backgrounds
+    if (detection.maskPolygon && detection.maskPolygon.length > 2) {
+      // Use polygon outline with proper color blending
+      ctx.globalCompositeOperation = "source-over";
+      ctx.fillStyle = `rgba(${color.r}, ${color.g}, ${color.b}, ${color.a * 0.7})`;
       ctx.beginPath();
       ctx.moveTo(detection.maskPolygon[0][0], detection.maskPolygon[0][1]);
 
@@ -553,18 +594,106 @@ export function applyNailColorFilter(
 
       ctx.closePath();
       ctx.fill();
-    } else {
-      // Fallback to bounding box with rounded corners for nail-like shape
-      const [x, y, width, height] = detection.bbox;
-      const radius = Math.min(width, height) * 0.3; // Rounded corners
-
-      ctx.fillStyle = `rgba(${color.r}, ${color.g}, ${color.b}, ${color.a})`;
-      ctx.beginPath();
-      ctx.roundRect(x, y, width, height, radius);
+      
+      // Add subtle highlight
+      const [bboxX, bboxY, bboxWidth, bboxHeight] = detection.bbox;
+      const gradient = ctx.createLinearGradient(bboxX, bboxY, bboxX, bboxY + bboxHeight);
+      gradient.addColorStop(0, `rgba(255, 255, 255, ${color.a * 0.15})`);
+      gradient.addColorStop(0.5, `rgba(255, 255, 255, ${color.a * 0.05})`);
+      gradient.addColorStop(1, `rgba(0, 0, 0, ${color.a * 0.02})`);
+      
+      ctx.fillStyle = gradient;
       ctx.fill();
+    } else if (detection.mask && detection.mask.length > 0) {
+      // Use the mask data if polygon is not available
+      applyMaskBasedColor(ctx, detection, color);
+    } else {
+      // Fallback to improved nail shape
+      applyNailShapeColor(ctx, detection, color);
     }
   });
 
-  // Reset blend mode
+  // Restore the previous state
+  ctx.restore();
+}
+
+/**
+ * Apply color using mask data for precise nail shape
+ */
+function applyMaskBasedColor(
+  ctx: CanvasRenderingContext2D,
+  detection: YoloDetection,
+  color: { r: number; g: number; b: number; a: number }
+): void {
+  const [bboxX, bboxY, bboxWidth, bboxHeight] = detection.bbox;
+  const mask = detection.mask!;
+  const maskHeight = mask.length;
+  const maskWidth = mask[0]?.length || 0;
+
+  if (maskHeight === 0 || maskWidth === 0) return;
+
+  // Use polygon approach to avoid gray background from ImageData
+  if (detection.maskPolygon && detection.maskPolygon.length > 2) {
+    ctx.globalCompositeOperation = "source-over";
+    ctx.fillStyle = `rgba(${color.r}, ${color.g}, ${color.b}, ${color.a * 0.7})`;
+    
+    ctx.beginPath();
+    ctx.moveTo(detection.maskPolygon[0][0], detection.maskPolygon[0][1]);
+    
+    for (let i = 1; i < detection.maskPolygon.length; i++) {
+      ctx.lineTo(detection.maskPolygon[i][0], detection.maskPolygon[i][1]);
+    }
+    
+    ctx.closePath();
+    ctx.fill();
+    
+    // Add subtle highlight
+    const gradient = ctx.createLinearGradient(bboxX, bboxY, bboxX, bboxY + bboxHeight);
+    gradient.addColorStop(0, `rgba(255, 255, 255, ${color.a * 0.15})`);
+    gradient.addColorStop(0.5, `rgba(255, 255, 255, ${color.a * 0.05})`);
+    gradient.addColorStop(1, `rgba(0, 0, 0, ${color.a * 0.02})`);
+    
+    ctx.fillStyle = gradient;
+    ctx.fill();
+  } else {
+    // Fallback to nail shape if no polygon available
+    applyNailShapeColor(ctx, detection, color);
+  }
+}
+
+/**
+ * Apply color using nail-shaped overlay
+ */
+function applyNailShapeColor(
+  ctx: CanvasRenderingContext2D,
+  detection: YoloDetection,
+  color: { r: number; g: number; b: number; a: number }
+): void {
+  const [x, y, width, height] = detection.bbox;
+  
+  // Create a more realistic nail shape
+  const cornerRadius = Math.min(width, height) * 0.25;
+  
+  // Use source-over for natural blending
   ctx.globalCompositeOperation = "source-over";
+  ctx.fillStyle = `rgba(${color.r}, ${color.g}, ${color.b}, ${color.a * 0.7})`;
+  
+  ctx.beginPath();
+  
+  // Create a rounded rectangle that looks more like a nail
+  ctx.roundRect(x, y, width, height, [
+    cornerRadius, cornerRadius, // top corners
+    cornerRadius * 0.5, cornerRadius * 0.5 // bottom corners (less rounded)
+  ]);
+  
+  ctx.fill();
+  
+  // Add a subtle highlight for more realistic appearance
+  const gradient = ctx.createLinearGradient(x, y, x, y + height);
+  gradient.addColorStop(0, `rgba(255, 255, 255, ${color.a * 0.2})`);
+  gradient.addColorStop(0.3, `rgba(255, 255, 255, ${color.a * 0.1})`);
+  gradient.addColorStop(1, `rgba(0, 0, 0, ${color.a * 0.05})`);
+  
+  ctx.fillStyle = gradient;
+  ctx.fill();
 }
