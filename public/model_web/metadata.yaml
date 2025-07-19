@@ -1,0 +1,20 @@
+description: Ultralytics YOLOv8s-seg model trained on D:\AI\Projects\yolov8_seg_nails\dataset\data.yaml
+author: Ultralytics
+date: '2025-07-19T20:48:33.798938'
+version: 8.3.168
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: segment
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: Nail
+args:
+  batch: 1
+  half: false
+  int8: false
+  nms: false
+channels: 3
