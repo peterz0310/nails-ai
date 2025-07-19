@@ -266,7 +266,9 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     // Use synced detections
     const currentDetections = syncedDetectionsRef.current;
 
-    console.log(`Drawing ${currentDetections.length} synced detections on captured frame`);
+    console.log(
+      `Drawing ${currentDetections.length} synced detections on captured frame`
+    );
 
     if (currentDetections.length > 0) {
       console.log("Frame sync drawing:", {
@@ -305,7 +307,9 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       const clampedHeight = Math.min(scaledHeight, canvas.height - clampedY);
 
       if (clampedWidth <= 0 || clampedHeight <= 0) {
-        console.warn(`Skipping detection ${index} - out of bounds after clamping`);
+        console.warn(
+          `Skipping detection ${index} - out of bounds after clamping`
+        );
         return;
       }
 
@@ -323,11 +327,19 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       const textHeight = 20;
 
       // Ensure label stays within canvas bounds
-      const labelX = Math.max(0, Math.min(clampedX, canvas.width - textWidth - 10));
+      const labelX = Math.max(
+        0,
+        Math.min(clampedX, canvas.width - textWidth - 10)
+      );
       const labelY = Math.max(textHeight + 2, clampedY);
 
       ctx.fillStyle = "#ff6b9d";
-      ctx.fillRect(labelX, labelY - textHeight - 2, textWidth + 10, textHeight + 4);
+      ctx.fillRect(
+        labelX,
+        labelY - textHeight - 2,
+        textWidth + 10,
+        textHeight + 4
+      );
 
       // Draw label text
       ctx.fillStyle = "white";
@@ -361,9 +373,15 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
 
       // Bottom-right corner
       ctx.beginPath();
-      ctx.moveTo(clampedX + clampedWidth - cornerSize, clampedY + clampedHeight);
+      ctx.moveTo(
+        clampedX + clampedWidth - cornerSize,
+        clampedY + clampedHeight
+      );
       ctx.lineTo(clampedX + clampedWidth, clampedY + clampedHeight);
-      ctx.lineTo(clampedX + clampedWidth, clampedY + clampedHeight - cornerSize);
+      ctx.lineTo(
+        clampedX + clampedWidth,
+        clampedY + clampedHeight - cornerSize
+      );
       ctx.stroke();
     });
   }, []);
@@ -474,7 +492,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                 ref={canvasRef}
                 className="w-full h-full object-cover"
                 style={{
-                  backgroundColor: '#1f2937', // gray-800 fallback
+                  backgroundColor: "#1f2937", // gray-800 fallback
                 }}
               />
               {!isWebcamActive && (
