@@ -423,19 +423,16 @@ function generateActualMask(
       `Generating mask: prototypes shape: ${prototypes.shape}, coeffs length: ${coeffs.length}`
     );
 
-    // Create coefficients tensor
+    // Create coefficients tensor - limit to the number of available prototypes
     const coeffsTensor = tf.tensor1d(coeffs.slice(0, numPrototypes));
 
-    // Get prototypes data and reshape for matrix multiplication
-    const prototypesData = prototypes.dataSync();
-    const prototypesTensor = tf.tensor3d(Array.from(prototypesData), [
-      numPrototypes,
-      maskHeight,
-      maskWidth,
-    ]);
+    // Remove batch dimension and get the prototypes tensor in correct shape
+    // Shape should be [channels, height, width] e.g., [32, 160, 160]
+    const prototypesReshaped = prototypes.squeeze([0]); // Remove batch dimension
 
     // Perform matrix multiplication: coeffs × prototypes
-    const maskTensor = tf.einsum("i,ihw->hw", coeffsTensor, prototypesTensor);
+    // Using einsum with correct indices: c (channels) × chw (channels, height, width) -> hw (height, width)
+    const maskTensor = tf.einsum("c,chw->hw", coeffsTensor, prototypesReshaped);
 
     // Apply sigmoid activation to get mask probabilities
     const sigmoidMask = tf.sigmoid(maskTensor);
@@ -466,7 +463,7 @@ function generateActualMask(
 
     // Clean up tensors
     coeffsTensor.dispose();
-    prototypesTensor.dispose();
+    prototypesReshaped.dispose();
     maskTensor.dispose();
     sigmoidMask.dispose();
 
