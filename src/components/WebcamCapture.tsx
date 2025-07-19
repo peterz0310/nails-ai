@@ -28,7 +28,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const pendingInferenceRef = useRef<boolean>(false);
   const lastInferenceTimeRef = useRef<number>(0);
-  const videoFrameRef = useRef<ImageData | null>(null);
+  const capturedFrameRef = useRef<HTMLCanvasElement | null>(null);
   const syncedDetectionsRef = useRef<YoloDetection[]>([]);
 
   // Load the model
@@ -121,7 +121,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     setDetections([]); // Clear detections when stopping
     syncedDetectionsRef.current = []; // Clear synced detections too
     pendingInferenceRef.current = false; // Reset pending state
-    videoFrameRef.current = null; // Clear frame reference
+    capturedFrameRef.current = null; // Clear frame reference
     if (animationRef.current) {
       cancelAnimationFrame(animationRef.current);
     }
@@ -166,9 +166,8 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       canvas.height = videoHeight;
       ctx.drawImage(videoRef.current, 0, 0, videoWidth, videoHeight);
 
-      // Store the frame data for synchronized drawing
-      const currentFrameData = ctx.getImageData(0, 0, videoWidth, videoHeight);
-      videoFrameRef.current = currentFrameData;
+      // Store the captured frame for synchronized display
+      capturedFrameRef.current = canvas;
 
       const preprocessed = preprocessImageForYolo(videoRef.current);
 
@@ -227,21 +226,24 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     }
   }, [isProcessing]);
 
-  // Draw detections on canvas
+  // Draw captured frame with detections on canvas
   const drawDetections = useCallback(() => {
-    if (!canvasRef.current || !videoRef.current) return;
+    if (!canvasRef.current || !capturedFrameRef.current) return;
 
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
+    const capturedFrame = capturedFrameRef.current;
+    const frameWidth = capturedFrame.width;
+    const frameHeight = capturedFrame.height;
+
+    if (frameWidth === 0 || frameHeight === 0) return;
+
+    // Get the video element's display dimensions
     const video = videoRef.current;
-    const videoWidth = video.videoWidth;
-    const videoHeight = video.videoHeight;
+    if (!video) return;
 
-    if (videoWidth === 0 || videoHeight === 0) return;
-
-    // Get the displayed video element dimensions
     const displayWidth = video.clientWidth;
     const displayHeight = video.clientHeight;
 
@@ -251,73 +253,46 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       canvas.height = displayHeight;
     }
 
-    // Calculate how the video is actually displayed within the container
-    // The video has object-fit: cover, so it might be cropped
-    const videoAspectRatio = videoWidth / videoHeight;
-    const displayAspectRatio = displayWidth / displayHeight;
-
-    let actualVideoWidth, actualVideoHeight, offsetX, offsetY;
-
-    if (videoAspectRatio > displayAspectRatio) {
-      // Video is wider - it will be cropped horizontally
-      actualVideoHeight = displayHeight;
-      actualVideoWidth = displayHeight * videoAspectRatio;
-      offsetX = (displayWidth - actualVideoWidth) / 2;
-      offsetY = 0;
-    } else {
-      // Video is taller - it will be cropped vertically
-      actualVideoWidth = displayWidth;
-      actualVideoHeight = displayWidth / videoAspectRatio;
-      offsetX = 0;
-      offsetY = (displayHeight - actualVideoHeight) / 2;
-    }
-
-    // Calculate scaling factors based on actual displayed video area
-    const scaleX = actualVideoWidth / videoWidth;
-    const scaleY = actualVideoHeight / videoHeight;
-
     // Clear canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Use synced detections to ensure frame/detection alignment
+    // Draw the captured frame (this ensures perfect sync between frame and detections)
+    ctx.drawImage(capturedFrame, 0, 0, displayWidth, displayHeight);
+
+    // Calculate scaling factors (simple since we're drawing the exact frame that was analyzed)
+    const scaleX = displayWidth / frameWidth;
+    const scaleY = displayHeight / frameHeight;
+
+    // Use synced detections
     const currentDetections = syncedDetectionsRef.current;
 
-    // Debug: Always log detection count
-    console.log(`Drawing ${currentDetections.length} synced detections`);
+    console.log(`Drawing ${currentDetections.length} synced detections on captured frame`);
 
-    // Debug: Log canvas and video info when detections are found
     if (currentDetections.length > 0) {
-      console.log("Drawing synced detections:", {
+      console.log("Frame sync drawing:", {
         count: currentDetections.length,
-        videoSize: { width: videoWidth, height: videoHeight },
+        frameSize: { width: frameWidth, height: frameHeight },
         displaySize: { width: displayWidth, height: displayHeight },
-        actualVideoSize: { width: actualVideoWidth, height: actualVideoHeight },
-        offset: { x: offsetX, y: offsetY },
-        canvasSize: { width: canvas.width, height: canvas.height },
         scales: { x: scaleX, y: scaleY },
       });
     }
 
-    // Draw detections
+    // Draw detections on top of the captured frame
     currentDetections.forEach((detection, index) => {
       const [x, y, width, height] = detection.bbox;
 
-      // Scale coordinates to match displayed video size and add offset
-      const scaledX = x * scaleX + offsetX;
-      const scaledY = y * scaleY + offsetY;
+      // Scale coordinates to match display size
+      const scaledX = x * scaleX;
+      const scaledY = y * scaleY;
       const scaledWidth = width * scaleX;
       const scaledHeight = height * scaleY;
 
       console.log(`Detection ${index}:`, {
         original: [x, y, width, height],
         scaled: [scaledX, scaledY, scaledWidth, scaledHeight],
-        videoAspect: videoAspectRatio,
-        displayAspect: displayAspectRatio,
-        actualVideo: { width: actualVideoWidth, height: actualVideoHeight },
-        offset: { x: offsetX, y: offsetY },
       });
 
-      // Only draw if coordinates are reasonable
+      // Validate dimensions
       if (scaledWidth <= 0 || scaledHeight <= 0) {
         console.warn(`Skipping detection ${index} - invalid dimensions`);
         return;
@@ -330,9 +305,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       const clampedHeight = Math.min(scaledHeight, canvas.height - clampedY);
 
       if (clampedWidth <= 0 || clampedHeight <= 0) {
-        console.warn(
-          `Skipping detection ${index} - out of bounds after clamping`
-        );
+        console.warn(`Skipping detection ${index} - out of bounds after clamping`);
         return;
       }
 
@@ -350,19 +323,11 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       const textHeight = 20;
 
       // Ensure label stays within canvas bounds
-      const labelX = Math.max(
-        0,
-        Math.min(clampedX, canvas.width - textWidth - 10)
-      );
+      const labelX = Math.max(0, Math.min(clampedX, canvas.width - textWidth - 10));
       const labelY = Math.max(textHeight + 2, clampedY);
 
       ctx.fillStyle = "#ff6b9d";
-      ctx.fillRect(
-        labelX,
-        labelY - textHeight - 2,
-        textWidth + 10,
-        textHeight + 4
-      );
+      ctx.fillRect(labelX, labelY - textHeight - 2, textWidth + 10, textHeight + 4);
 
       // Draw label text
       ctx.fillStyle = "white";
@@ -396,15 +361,9 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
 
       // Bottom-right corner
       ctx.beginPath();
-      ctx.moveTo(
-        clampedX + clampedWidth - cornerSize,
-        clampedY + clampedHeight
-      );
+      ctx.moveTo(clampedX + clampedWidth - cornerSize, clampedY + clampedHeight);
       ctx.lineTo(clampedX + clampedWidth, clampedY + clampedHeight);
-      ctx.lineTo(
-        clampedX + clampedWidth,
-        clampedY + clampedHeight - cornerSize
-      );
+      ctx.lineTo(clampedX + clampedWidth, clampedY + clampedHeight - cornerSize);
       ctx.stroke();
     });
   }, []);
@@ -412,15 +371,12 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   // Main processing loop
   const processFrame = useCallback(() => {
     if (isWebcamActive && videoRef.current && modelRef.current) {
-      // Only draw when we have an inference to show
-      if (
-        syncedDetectionsRef.current.length > 0 ||
-        !pendingInferenceRef.current
-      ) {
+      // Only draw when we have a captured frame with detections
+      if (capturedFrameRef.current && syncedDetectionsRef.current.length >= 0) {
         drawDetections();
       }
 
-      // Run inference at a controlled rate, synchronized with drawing
+      // Run inference at a controlled rate - this will capture frames and sync detections
       if (!pendingInferenceRef.current && !isProcessing) {
         runInference();
       }
@@ -483,12 +439,13 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
               )}
             </h3>
             <div className="relative bg-gray-900 rounded-lg overflow-hidden aspect-square">
+              {/* Hidden video element - used only for capture */}
               <video
                 ref={videoRef}
                 autoPlay
                 playsInline
                 muted
-                className="w-full h-full object-cover"
+                className="absolute top-0 left-0 w-full h-full object-cover opacity-0 pointer-events-none"
                 onLoadedMetadata={() => {
                   console.log("Video metadata loaded:", {
                     width: videoRef.current?.videoWidth,
@@ -512,12 +469,12 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                   }, 100);
                 }}
               />
-              {/* Canvas overlay for detections */}
+              {/* Canvas that shows captured frames with detections */}
               <canvas
                 ref={canvasRef}
-                className="absolute top-0 left-0 w-full h-full pointer-events-none"
+                className="w-full h-full object-cover"
                 style={{
-                  zIndex: 10,
+                  backgroundColor: '#1f2937', // gray-800 fallback
                 }}
               />
               {!isWebcamActive && (
@@ -528,7 +485,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                   </div>
                 </div>
               )}
-              {detections.length === 0 && isWebcamActive && !isProcessing && (
+              {!capturedFrameRef.current && isWebcamActive && !isProcessing && (
                 <div className="absolute top-4 left-4 bg-black bg-opacity-50 text-white px-3 py-2 rounded-lg">
                   <div className="text-sm">
                     🔍 Place your hand in front of the camera
