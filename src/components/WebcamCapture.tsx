@@ -432,8 +432,12 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     ctx.drawImage(video, 0, 0, displayWidth, displayHeight);
 
     // Use captured frame for coordinate calculations if available
-    const frameWidth = capturedFrameRef.current ? capturedFrameRef.current.width : video.videoWidth;
-    const frameHeight = capturedFrameRef.current ? capturedFrameRef.current.height : video.videoHeight;
+    const frameWidth = capturedFrameRef.current
+      ? capturedFrameRef.current.width
+      : video.videoWidth;
+    const frameHeight = capturedFrameRef.current
+      ? capturedFrameRef.current.height
+      : video.videoHeight;
 
     if (frameWidth === 0 || frameHeight === 0) return;
 
