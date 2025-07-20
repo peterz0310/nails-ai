@@ -9,17 +9,30 @@ import {
   YoloDetection,
   applyNailColorFilter,
 } from "../utils/yolo";
+import {
+  initializeMediaPipeHands,
+  processMediaPipeResults,
+  drawHandDetections,
+  HandDetection,
+  MediaPipeHandsResult,
+  disposeMediaPipeHands,
+} from "../utils/mediapipe";
 
 interface WebcamCaptureProps {
   onModelLoaded: (loaded: boolean) => void;
 }
 
+type DetectionMode = "nails" | "hands" | "both";
+
 const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const modelRef = useRef<tf.GraphModel | null>(null);
+  const handsModelRef = useRef<any>(null);
   const [isWebcamActive, setIsWebcamActive] = useState(false);
   const [detections, setDetections] = useState<YoloDetection[]>([]);
+  const [handDetections, setHandDetections] = useState<HandDetection[]>([]);
+  const [detectionMode, setDetectionMode] = useState<DetectionMode>("nails");
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fps, setFps] = useState(0);
@@ -31,6 +44,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   const lastInferenceTimeRef = useRef<number>(0);
   const capturedFrameRef = useRef<HTMLCanvasElement | null>(null);
   const syncedDetectionsRef = useRef<YoloDetection[]>([]);
+  const syncedHandDetectionsRef = useRef<HandDetection[]>([]);
   const [selectedColor, setSelectedColor] = useState({
     r: 255,
     g: 107,
@@ -40,54 +54,91 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [enableColorFilter, setEnableColorFilter] = useState(false);
 
-  // Load the model
+  // Load the models
   const loadModel = useCallback(async () => {
     try {
-      console.log("Loading nail segmentation model...");
+      console.log("Loading models...");
 
       // Initialize TensorFlow.js backend
       await tf.ready();
       console.log("TensorFlow.js backend initialized");
       console.log("Available backends:", tf.getBackend());
 
-      // Try to load the model from the model_web folder
-      const modelUrl = "/model_web/model.json";
-      const model = await tf.loadGraphModel(modelUrl);
+      let nailModelLoaded = false;
+      let handsModelLoaded = false;
 
-      modelRef.current = model;
-      onModelLoaded(true);
+      // Load nail segmentation model
+      try {
+        const modelUrl = "/model_web/model.json";
+        const model = await tf.loadGraphModel(modelUrl);
+        modelRef.current = model;
+        nailModelLoaded = true;
 
-      console.log("Model loaded successfully");
-      console.log(
-        "Model inputs:",
-        model.inputs.map((input) => ({
-          name: input.name,
-          shape: input.shape,
-          dtype: input.dtype,
-        }))
-      );
-      console.log(
-        "Model outputs:",
-        model.outputs.map((output) => ({
-          name: output.name,
-          shape: output.shape,
-          dtype: output.dtype,
-        }))
-      );
+        console.log("Nail segmentation model loaded successfully");
+        console.log(
+          "Model inputs:",
+          model.inputs.map((input) => ({
+            name: input.name,
+            shape: input.shape,
+            dtype: input.dtype,
+          }))
+        );
+        console.log(
+          "Model outputs:",
+          model.outputs.map((output) => ({
+            name: output.name,
+            shape: output.shape,
+            dtype: output.dtype,
+          }))
+        );
 
-      // Warm up the model with a dummy input
-      console.log("Warming up model...");
-      const dummyInput = tf.zeros([1, 640, 640, 3]);
-      const warmupOutputs = (await model.executeAsync(
-        dummyInput
-      )) as tf.Tensor[];
-      warmupOutputs.forEach((tensor) => tensor.dispose());
-      dummyInput.dispose();
-      console.log("Model warmup completed");
+        // Warm up the model with a dummy input
+        console.log("Warming up nail model...");
+        const dummyInput = tf.zeros([1, 640, 640, 3]);
+        const warmupOutputs = (await model.executeAsync(
+          dummyInput
+        )) as tf.Tensor[];
+        warmupOutputs.forEach((tensor) => tensor.dispose());
+        dummyInput.dispose();
+        console.log("Nail model warmup completed");
+      } catch (error) {
+        console.error("Error loading nail segmentation model:", error);
+      }
+
+      // Load MediaPipe hands model
+      try {
+        const hands = await initializeMediaPipeHands();
+
+        hands.onResults((results: any) => {
+          const handsResult = processMediaPipeResults(results);
+          console.log(`MediaPipe detected ${handsResult.hands.length} hands`);
+
+          // Update hand detections in sync
+          setHandDetections(handsResult.hands);
+          syncedHandDetectionsRef.current = handsResult.hands;
+        });
+
+        handsModelRef.current = hands;
+        handsModelLoaded = true;
+        console.log("MediaPipe hands model loaded successfully");
+      } catch (error) {
+        console.error("Error loading MediaPipe hands model:", error);
+      }
+
+      // Report overall loading status
+      onModelLoaded(nailModelLoaded || handsModelLoaded);
+
+      if (!nailModelLoaded && !handsModelLoaded) {
+        setError("Failed to load any models");
+      } else if (!nailModelLoaded) {
+        setError("Nail segmentation model failed to load");
+      } else if (!handsModelLoaded) {
+        setError("Hand detection model failed to load");
+      }
     } catch (error) {
-      console.error("Error loading model:", error);
+      console.error("Error during model loading:", error);
       setError(
-        `Failed to load model: ${
+        `Failed to load models: ${
           error instanceof Error ? error.message : "Unknown error"
         }`
       );
@@ -128,7 +179,9 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     }
     setIsWebcamActive(false);
     setDetections([]); // Clear detections when stopping
+    setHandDetections([]); // Clear hand detections
     syncedDetectionsRef.current = []; // Clear synced detections too
+    syncedHandDetectionsRef.current = []; // Clear synced hand detections
     pendingInferenceRef.current = false; // Reset pending state
     capturedFrameRef.current = null; // Clear frame reference
     if (animationRef.current) {
@@ -139,10 +192,10 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   // Run inference
   const runInference = useCallback(async () => {
     if (
-      !modelRef.current ||
       !videoRef.current ||
       isProcessing ||
-      pendingInferenceRef.current
+      pendingInferenceRef.current ||
+      (!modelRef.current && !handsModelRef.current)
     )
       return;
 
@@ -178,41 +231,66 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       // Store the captured frame for synchronized display
       capturedFrameRef.current = canvas;
 
-      const preprocessed = preprocessImageForYolo(videoRef.current);
+      // Run nail segmentation if enabled and model is loaded
+      if (
+        (detectionMode === "nails" || detectionMode === "both") &&
+        modelRef.current
+      ) {
+        const preprocessed = preprocessImageForYolo(videoRef.current);
 
-      // Run model inference
-      const outputs = (await modelRef.current.executeAsync(
-        preprocessed
-      )) as tf.Tensor[];
+        // Run model inference
+        const outputs = (await modelRef.current.executeAsync(
+          preprocessed
+        )) as tf.Tensor[];
 
-      console.log(
-        "Model outputs:",
-        outputs.map((o) => ({ shape: o.shape, dtype: o.dtype }))
-      );
-
-      // Process YOLO output
-      const result = processYoloOutput(
-        outputs,
-        videoWidth,
-        videoHeight,
-        0.5, // increased confidence threshold
-        0.45 // NMS threshold
-      );
-
-      // Only update detections if this inference is still relevant
-      if (pendingInferenceRef.current) {
         console.log(
-          `Setting ${result.detections.length} detections from inference`
+          "Nail model outputs:",
+          outputs.map((o) => ({ shape: o.shape, dtype: o.dtype }))
         );
-        // Update both the state and the synced ref simultaneously
-        setDetections(result.detections);
-        syncedDetectionsRef.current = result.detections;
-        lastInferenceTimeRef.current = currentTime;
+
+        // Process YOLO output
+        const result = processYoloOutput(
+          outputs,
+          videoWidth,
+          videoHeight,
+          0.5, // increased confidence threshold
+          0.45 // NMS threshold
+        );
+
+        // Only update detections if this inference is still relevant
+        if (pendingInferenceRef.current) {
+          console.log(
+            `Setting ${result.detections.length} nail detections from inference`
+          );
+          // Update both the state and the synced ref simultaneously
+          setDetections(result.detections);
+          syncedDetectionsRef.current = result.detections;
+        }
+
+        // Clean up tensors
+        preprocessed.dispose();
+        outputs.forEach((tensor) => tensor.dispose());
+      } else {
+        // Clear nail detections if not in nail mode
+        setDetections([]);
+        syncedDetectionsRef.current = [];
       }
 
-      // Clean up tensors
-      preprocessed.dispose();
-      outputs.forEach((tensor) => tensor.dispose());
+      // Run hand detection if enabled and model is loaded
+      if (
+        (detectionMode === "hands" || detectionMode === "both") &&
+        handsModelRef.current
+      ) {
+        // MediaPipe hands expects the video element directly
+        await handsModelRef.current.send({ image: videoRef.current });
+        // Results are handled in the onResults callback set during model loading
+      } else {
+        // Clear hand detections if not in hands mode
+        setHandDetections([]);
+        syncedHandDetectionsRef.current = [];
+      }
+
+      lastInferenceTimeRef.current = currentTime;
 
       // Calculate FPS
       frameCountRef.current++;
@@ -233,7 +311,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       setIsProcessing(false);
       pendingInferenceRef.current = false;
     }
-  }, [isProcessing]);
+  }, [isProcessing, detectionMode]);
 
   // Draw captured frame with detections on canvas
   const drawDetections = useCallback(() => {
@@ -274,22 +352,18 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
 
     // Use synced detections
     const currentDetections = syncedDetectionsRef.current;
+    const currentHandDetections = syncedHandDetectionsRef.current;
 
     console.log(
-      `Drawing ${currentDetections.length} synced detections on captured frame`
+      `Drawing ${currentDetections.length} nail detections and ${currentHandDetections.length} hand detections on captured frame`
     );
 
-    if (currentDetections.length > 0) {
-      console.log("Frame sync drawing:", {
-        count: currentDetections.length,
-        frameSize: { width: frameWidth, height: frameHeight },
-        displaySize: { width: displayWidth, height: displayHeight },
-        scales: { x: scaleX, y: scaleY },
-      });
-    }
-
-    // Apply color filter if enabled
-    if (enableColorFilter && currentDetections.length > 0) {
+    // Apply color filter if enabled (only for nails)
+    if (
+      enableColorFilter &&
+      currentDetections.length > 0 &&
+      (detectionMode === "nails" || detectionMode === "both")
+    ) {
       // Scale detections to display size
       const scaledDetections = currentDetections.map((detection) => ({
         ...detection,
@@ -308,154 +382,185 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       applyNailColorFilter(canvas, scaledDetections, selectedColor);
     }
 
-    // Draw detection outlines and labels
-    currentDetections.forEach((detection, index) => {
-      const [x, y, width, height] = detection.bbox;
+    // Draw nail detection outlines and labels
+    if (detectionMode === "nails" || detectionMode === "both") {
+      currentDetections.forEach((detection, index) => {
+        const [x, y, width, height] = detection.bbox;
 
-      // Scale coordinates to match display size
-      const scaledX = x * scaleX;
-      const scaledY = y * scaleY;
-      const scaledWidth = width * scaleX;
-      const scaledHeight = height * scaleY;
+        // Scale coordinates to match display size
+        const scaledX = x * scaleX;
+        const scaledY = y * scaleY;
+        const scaledWidth = width * scaleX;
+        const scaledHeight = height * scaleY;
 
-      console.log(`Detection ${index}:`, {
-        original: [x, y, width, height],
-        scaled: [scaledX, scaledY, scaledWidth, scaledHeight],
-      });
+        // Validate dimensions
+        if (scaledWidth <= 0 || scaledHeight <= 0) {
+          console.warn(`Skipping nail detection ${index} - invalid dimensions`);
+          return;
+        }
 
-      // Validate dimensions
-      if (scaledWidth <= 0 || scaledHeight <= 0) {
-        console.warn(`Skipping detection ${index} - invalid dimensions`);
-        return;
-      }
+        // Clamp coordinates to canvas bounds
+        const clampedX = Math.max(0, Math.min(scaledX, canvas.width));
+        const clampedY = Math.max(0, Math.min(scaledY, canvas.height));
+        const clampedWidth = Math.min(scaledWidth, canvas.width - clampedX);
+        const clampedHeight = Math.min(scaledHeight, canvas.height - clampedY);
 
-      // Clamp coordinates to canvas bounds
-      const clampedX = Math.max(0, Math.min(scaledX, canvas.width));
-      const clampedY = Math.max(0, Math.min(scaledY, canvas.height));
-      const clampedWidth = Math.min(scaledWidth, canvas.width - clampedX);
-      const clampedHeight = Math.min(scaledHeight, canvas.height - clampedY);
+        if (clampedWidth <= 0 || clampedHeight <= 0) {
+          console.warn(
+            `Skipping nail detection ${index} - out of bounds after clamping`
+          );
+          return;
+        }
 
-      if (clampedWidth <= 0 || clampedHeight <= 0) {
-        console.warn(
-          `Skipping detection ${index} - out of bounds after clamping`
+        // Draw precise boundary if available
+        if (detection.maskPolygon && detection.maskPolygon.length > 2) {
+          // Draw precise mask polygon outline
+          ctx.strokeStyle = "#ff6b9d";
+          ctx.lineWidth = 2;
+          ctx.setLineDash([]);
+
+          ctx.beginPath();
+          const firstPoint = detection.maskPolygon[0];
+          ctx.moveTo(firstPoint[0] * scaleX, firstPoint[1] * scaleY);
+
+          for (let i = 1; i < detection.maskPolygon.length; i++) {
+            const point = detection.maskPolygon[i];
+            ctx.lineTo(point[0] * scaleX, point[1] * scaleY);
+          }
+
+          ctx.closePath();
+          ctx.stroke();
+
+          // Optional: draw semi-transparent fill
+          if (!enableColorFilter) {
+            ctx.fillStyle = "rgba(255, 107, 157, 0.2)";
+            ctx.fill();
+          }
+        } else {
+          // Fallback to enhanced bounding box with nail-like shape
+          const radius = Math.min(clampedWidth, clampedHeight) * 0.3;
+
+          ctx.strokeStyle = "#ff6b9d";
+          ctx.lineWidth = 3;
+          ctx.setLineDash([]);
+
+          ctx.beginPath();
+          ctx.roundRect(
+            clampedX,
+            clampedY,
+            clampedWidth,
+            clampedHeight,
+            radius
+          );
+          ctx.stroke();
+
+          if (!enableColorFilter) {
+            ctx.fillStyle = "rgba(255, 107, 157, 0.2)";
+            ctx.fill();
+          }
+        }
+
+        // Draw filled background for label
+        const label = `Nail ${(detection.score * 100).toFixed(1)}%`;
+        ctx.font = "bold 14px Arial";
+        const textMetrics = ctx.measureText(label);
+        const textWidth = textMetrics.width;
+        const textHeight = 20;
+
+        // Ensure label stays within canvas bounds
+        const labelX = Math.max(
+          0,
+          Math.min(clampedX, canvas.width - textWidth - 10)
         );
-        return;
-      }
+        const labelY = Math.max(textHeight + 2, clampedY);
 
-      // Draw precise boundary if available
-      if (detection.maskPolygon && detection.maskPolygon.length > 2) {
-        // Draw precise mask polygon outline
+        ctx.fillStyle = "#ff6b9d";
+        ctx.fillRect(
+          labelX,
+          labelY - textHeight - 2,
+          textWidth + 10,
+          textHeight + 4
+        );
+
+        // Draw label text
+        ctx.fillStyle = "white";
+        ctx.fillText(label, labelX + 5, labelY - 5);
+
+        // Draw corner indicators for enhanced UI
+        const cornerSize = Math.min(15, clampedWidth / 4, clampedHeight / 4);
         ctx.strokeStyle = "#ff6b9d";
         ctx.lineWidth = 2;
-        ctx.setLineDash([]);
 
+        // Top-left corner
         ctx.beginPath();
-        const firstPoint = detection.maskPolygon[0];
-        ctx.moveTo(firstPoint[0] * scaleX, firstPoint[1] * scaleY);
-
-        for (let i = 1; i < detection.maskPolygon.length; i++) {
-          const point = detection.maskPolygon[i];
-          ctx.lineTo(point[0] * scaleX, point[1] * scaleY);
-        }
-
-        ctx.closePath();
+        ctx.moveTo(clampedX, clampedY + cornerSize);
+        ctx.lineTo(clampedX, clampedY);
+        ctx.lineTo(clampedX + cornerSize, clampedY);
         ctx.stroke();
 
-        // Optional: draw semi-transparent fill
-        if (!enableColorFilter) {
-          ctx.fillStyle = "rgba(255, 107, 157, 0.2)";
-          ctx.fill();
-        }
-      } else {
-        // Fallback to enhanced bounding box with nail-like shape
-        const radius = Math.min(clampedWidth, clampedHeight) * 0.3;
-
-        ctx.strokeStyle = "#ff6b9d";
-        ctx.lineWidth = 3;
-        ctx.setLineDash([]);
-
+        // Top-right corner
         ctx.beginPath();
-        ctx.roundRect(clampedX, clampedY, clampedWidth, clampedHeight, radius);
+        ctx.moveTo(clampedX + clampedWidth - cornerSize, clampedY);
+        ctx.lineTo(clampedX + clampedWidth, clampedY);
+        ctx.lineTo(clampedX + clampedWidth, clampedY + cornerSize);
         ctx.stroke();
 
-        if (!enableColorFilter) {
-          ctx.fillStyle = "rgba(255, 107, 157, 0.2)";
-          ctx.fill();
-        }
-      }
+        // Bottom-left corner
+        ctx.beginPath();
+        ctx.moveTo(clampedX, clampedY + clampedHeight - cornerSize);
+        ctx.lineTo(clampedX, clampedY + clampedHeight);
+        ctx.lineTo(clampedX + cornerSize, clampedY + clampedHeight);
+        ctx.stroke();
 
-      // Draw filled background for label
-      const label = `Nail ${(detection.score * 100).toFixed(1)}%`;
-      ctx.font = "bold 14px Arial";
-      const textMetrics = ctx.measureText(label);
-      const textWidth = textMetrics.width;
-      const textHeight = 20;
+        // Bottom-right corner
+        ctx.beginPath();
+        ctx.moveTo(
+          clampedX + clampedWidth - cornerSize,
+          clampedY + clampedHeight
+        );
+        ctx.lineTo(clampedX + clampedWidth, clampedY + clampedHeight);
+        ctx.lineTo(
+          clampedX + clampedWidth,
+          clampedY + clampedHeight - cornerSize
+        );
+        ctx.stroke();
+      });
+    }
 
-      // Ensure label stays within canvas bounds
-      const labelX = Math.max(
-        0,
-        Math.min(clampedX, canvas.width - textWidth - 10)
-      );
-      const labelY = Math.max(textHeight + 2, clampedY);
+    // Draw hand detections
+    if (detectionMode === "hands" || detectionMode === "both") {
+      // Create a temporary canvas for hand drawing that matches our display canvas
+      const tempCanvas = document.createElement("canvas");
+      tempCanvas.width = displayWidth;
+      tempCanvas.height = displayHeight;
 
-      ctx.fillStyle = "#ff6b9d";
-      ctx.fillRect(
-        labelX,
-        labelY - textHeight - 2,
-        textWidth + 10,
-        textHeight + 4
-      );
+      drawHandDetections(tempCanvas, currentHandDetections, {
+        drawLandmarks: true,
+        drawConnections: true,
+        landmarkColor: "#00ff00",
+        connectionColor: "#0000ff",
+        landmarkSize: 4,
+        connectionWidth: 2,
+      });
 
-      // Draw label text
-      ctx.fillStyle = "white";
-      ctx.fillText(label, labelX + 5, labelY - 5);
-
-      // Draw corner indicators for enhanced UI
-      const cornerSize = Math.min(15, clampedWidth / 4, clampedHeight / 4);
-      ctx.strokeStyle = "#ff6b9d";
-      ctx.lineWidth = 2;
-
-      // Top-left corner
-      ctx.beginPath();
-      ctx.moveTo(clampedX, clampedY + cornerSize);
-      ctx.lineTo(clampedX, clampedY);
-      ctx.lineTo(clampedX + cornerSize, clampedY);
-      ctx.stroke();
-
-      // Top-right corner
-      ctx.beginPath();
-      ctx.moveTo(clampedX + clampedWidth - cornerSize, clampedY);
-      ctx.lineTo(clampedX + clampedWidth, clampedY);
-      ctx.lineTo(clampedX + clampedWidth, clampedY + cornerSize);
-      ctx.stroke();
-
-      // Bottom-left corner
-      ctx.beginPath();
-      ctx.moveTo(clampedX, clampedY + clampedHeight - cornerSize);
-      ctx.lineTo(clampedX, clampedY + clampedHeight);
-      ctx.lineTo(clampedX + cornerSize, clampedY + clampedHeight);
-      ctx.stroke();
-
-      // Bottom-right corner
-      ctx.beginPath();
-      ctx.moveTo(
-        clampedX + clampedWidth - cornerSize,
-        clampedY + clampedHeight
-      );
-      ctx.lineTo(clampedX + clampedWidth, clampedY + clampedHeight);
-      ctx.lineTo(
-        clampedX + clampedWidth,
-        clampedY + clampedHeight - cornerSize
-      );
-      ctx.stroke();
-    });
-  }, [enableColorFilter, selectedColor]);
+      // Draw the hand detection canvas onto our main canvas
+      ctx.drawImage(tempCanvas, 0, 0);
+    }
+  }, [enableColorFilter, selectedColor, detectionMode]);
 
   // Main processing loop
   const processFrame = useCallback(() => {
-    if (isWebcamActive && videoRef.current && modelRef.current) {
+    if (
+      isWebcamActive &&
+      videoRef.current &&
+      (modelRef.current || handsModelRef.current)
+    ) {
       // Only draw when we have a captured frame with detections
-      if (capturedFrameRef.current && syncedDetectionsRef.current.length >= 0) {
+      if (
+        capturedFrameRef.current &&
+        (syncedDetectionsRef.current.length >= 0 ||
+          syncedHandDetectionsRef.current.length >= 0)
+      ) {
         drawDetections();
       }
 
@@ -495,7 +600,10 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     if (videoRef.current) {
       resizeObserverRef.current = new ResizeObserver(() => {
         // Trigger a redraw when video element is resized
-        if (syncedDetectionsRef.current.length > 0) {
+        if (
+          syncedDetectionsRef.current.length > 0 ||
+          syncedHandDetectionsRef.current.length > 0
+        ) {
           drawDetections();
         }
       });
@@ -510,7 +618,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   }, [drawDetections]);
 
   useEffect(() => {
-    if (isWebcamActive && modelRef.current) {
+    if (isWebcamActive && (modelRef.current || handsModelRef.current)) {
       processFrame();
     }
 
@@ -521,6 +629,13 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     };
   }, [isWebcamActive, processFrame]);
 
+  // Cleanup effect for MediaPipe
+  useEffect(() => {
+    return () => {
+      disposeMediaPipeHands();
+    };
+  }, []);
+
   return (
     <div className="w-full max-w-4xl">
       <div className="bg-white rounded-lg shadow-lg p-6">
@@ -528,7 +643,17 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
           {/* Single Video Feed with Overlaid Detections */}
           <div className="w-full max-w-2xl">
             <h3 className="text-lg font-semibold mb-4 flex items-center gap-2 justify-center">
-              � Nail Detection Camera
+              {detectionMode === "nails"
+                ? "💅"
+                : detectionMode === "hands"
+                ? "👋"
+                : "💅👋"}
+              {detectionMode === "nails"
+                ? "Nail Detection"
+                : detectionMode === "hands"
+                ? "Hand Detection"
+                : "Nail & Hand Detection"}{" "}
+              Camera
               {fps > 0 && (
                 <span className="text-sm bg-blue-100 text-blue-800 px-2 py-1 rounded">
                   {fps} FPS
@@ -560,7 +685,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                   // Wait a moment for video to be fully ready
                   setTimeout(() => {
                     if (
-                      modelRef.current &&
+                      (modelRef.current || handsModelRef.current) &&
                       videoRef.current &&
                       videoRef.current.videoWidth > 0
                     ) {
@@ -580,7 +705,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
               {!isWebcamActive && (
                 <div className="absolute inset-0 flex items-center justify-center text-white">
                   <div className="text-center">
-                    <div className="text-4xl mb-2">�</div>
+                    <div className="text-4xl mb-2">📹</div>
                     <div>Camera not active</div>
                   </div>
                 </div>
@@ -600,7 +725,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
         <div className="mt-6 flex flex-wrap gap-4 justify-center">
           <button
             onClick={isWebcamActive ? stopWebcam : startWebcam}
-            disabled={!modelRef.current}
+            disabled={!modelRef.current && !handsModelRef.current}
             className={`px-6 py-2 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
               isWebcamActive
                 ? "bg-red-500 hover:bg-red-600 text-white"
@@ -610,10 +735,46 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
             {isWebcamActive ? "🛑 Stop Camera" : "📷 Start Camera"}
           </button>
 
+          {/* Detection Mode Toggle */}
+          <div className="flex rounded-lg border border-gray-300 overflow-hidden">
+            {(["nails", "hands", "both"] as DetectionMode[]).map((mode) => (
+              <button
+                key={mode}
+                onClick={() => setDetectionMode(mode)}
+                disabled={
+                  (mode === "nails" && !modelRef.current) ||
+                  (mode === "hands" && !handsModelRef.current) ||
+                  (mode === "both" &&
+                    !modelRef.current &&
+                    !handsModelRef.current)
+                }
+                className={`px-4 py-2 font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                  detectionMode === mode
+                    ? mode === "nails"
+                      ? "bg-pink-500 text-white"
+                      : mode === "hands"
+                      ? "bg-blue-500 text-white"
+                      : "bg-purple-500 text-white"
+                    : "bg-white text-gray-700 hover:bg-gray-50"
+                }`}
+              >
+                {mode === "nails"
+                  ? "💅 Nails"
+                  : mode === "hands"
+                  ? "👋 Hands"
+                  : "💅👋 Both"}
+              </button>
+            ))}
+          </div>
+
           {/* Color Filter Toggle */}
           <button
             onClick={() => setEnableColorFilter(!enableColorFilter)}
-            disabled={!isWebcamActive || detections.length === 0}
+            disabled={
+              !isWebcamActive ||
+              detections.length === 0 ||
+              detectionMode === "hands"
+            }
             className={`px-6 py-2 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
               enableColorFilter
                 ? "bg-purple-500 hover:bg-purple-600 text-white"
@@ -737,7 +898,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
 
         {/* Stats */}
         {isWebcamActive && (
-          <div className="mt-4 grid grid-cols-2 md:grid-cols-5 gap-4 text-center">
+          <div className="mt-4 grid grid-cols-2 md:grid-cols-6 gap-4 text-center">
             <div className="bg-pink-50 rounded-lg p-3">
               <div className="text-2xl font-bold text-pink-600">
                 {detections.length}
@@ -746,6 +907,12 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
             </div>
             <div className="bg-blue-50 rounded-lg p-3">
               <div className="text-2xl font-bold text-blue-600">
+                {handDetections.length}
+              </div>
+              <div className="text-sm text-gray-600">Hands Detected</div>
+            </div>
+            <div className="bg-green-50 rounded-lg p-3">
+              <div className="text-2xl font-bold text-green-600">
                 {detections.length > 0
                   ? (
                       (detections.reduce((acc, d) => acc + d.score, 0) /
@@ -767,27 +934,28 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
               </div>
               <div className="text-sm text-gray-600">Precise Bounds</div>
             </div>
-            <div className="bg-green-50 rounded-lg p-3">
-              <div className="text-2xl font-bold text-green-600">
-                {enableColorFilter ? "ON" : "OFF"}
+            <div className="bg-indigo-50 rounded-lg p-3">
+              <div className="text-2xl font-bold text-indigo-600">
+                {detectionMode.toUpperCase()}
               </div>
-              <div className="text-sm text-gray-600">Color Filter</div>
+              <div className="text-sm text-gray-600">Detection Mode</div>
             </div>
           </div>
         )}
 
         {/* Detection Details */}
-        {detections.length > 0 && (
+        {(detections.length > 0 || handDetections.length > 0) && (
           <div className="mt-4">
             <h4 className="text-md font-semibold mb-2">Detection Details</h4>
             <div className="space-y-2 max-h-32 overflow-y-auto">
+              {/* Nail Detections */}
               {detections.map((detection, index) => (
                 <div
-                  key={index}
-                  className="text-sm bg-gray-50 rounded p-2 flex justify-between items-center"
+                  key={`nail-${index}`}
+                  className="text-sm bg-pink-50 rounded p-2 flex justify-between items-center"
                 >
                   <div className="flex items-center gap-2">
-                    <span>Nail #{index + 1}</span>
+                    <span>💅 Nail #{index + 1}</span>
                     {detection.maskPolygon && (
                       <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded">
                         Precise
@@ -814,6 +982,28 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                   </div>
                 </div>
               ))}
+
+              {/* Hand Detections */}
+              {handDetections.map((hand, index) => (
+                <div
+                  key={`hand-${index}`}
+                  className="text-sm bg-blue-50 rounded p-2 flex justify-between items-center"
+                >
+                  <div className="flex items-center gap-2">
+                    <span>
+                      👋 {hand.handedness} Hand #{index + 1}
+                    </span>
+                    <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded">
+                      {hand.landmarks.length} Landmarks
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-blue-600">
+                      {(hand.score * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         )}
@@ -829,7 +1019,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
             <button
               onClick={() => {
                 setError(null);
-                if (!modelRef.current) {
+                if (!modelRef.current && !handsModelRef.current) {
                   loadModel();
                 }
               }}
