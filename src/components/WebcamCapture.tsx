@@ -45,6 +45,11 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   const capturedFrameRef = useRef<HTMLCanvasElement | null>(null);
   const syncedDetectionsRef = useRef<YoloDetection[]>([]);
   const syncedHandDetectionsRef = useRef<HandDetection[]>([]);
+  const currentDetectionModeRef = useRef<DetectionMode>(detectionMode);
+  const tempHandCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const lastDrawTimeRef = useRef<number>(0);
+  const lastNailInferenceRef = useRef<number>(0);
+  const lastHandInferenceRef = useRef<number>(0);
   const [selectedColor, setSelectedColor] = useState({
     r: 255,
     g: 107,
@@ -53,6 +58,40 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   }); // Default pink
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [enableColorFilter, setEnableColorFilter] = useState(false);
+  const [performanceMode, setPerformanceMode] = useState(true); // Default to performance mode
+
+  // Detection mode change handler with cleanup
+  const handleDetectionModeChange = useCallback(
+    (newMode: DetectionMode) => {
+      console.log(
+        `Switching detection mode from ${detectionMode} to ${newMode}`
+      );
+
+      // Clear existing detections when switching modes
+      if (newMode !== detectionMode) {
+        if (newMode === "nails") {
+          setHandDetections([]);
+          syncedHandDetectionsRef.current = [];
+        } else if (newMode === "hands") {
+          setDetections([]);
+          syncedDetectionsRef.current = [];
+        }
+        // For "both" mode, keep existing detections
+      }
+
+      setDetectionMode(newMode);
+      currentDetectionModeRef.current = newMode;
+
+      // Reset inference timing to ensure immediate processing with new mode
+      lastNailInferenceRef.current = 0;
+      lastHandInferenceRef.current = 0;
+      pendingInferenceRef.current = false;
+
+      // Clear captured frame to force recapture with new mode
+      capturedFrameRef.current = null;
+    },
+    [detectionMode]
+  );
 
   // Load the models
   const loadModel = useCallback(async () => {
@@ -113,9 +152,23 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
           const handsResult = processMediaPipeResults(results);
           console.log(`MediaPipe detected ${handsResult.hands.length} hands`);
 
-          // Update hand detections in sync
-          setHandDetections(handsResult.hands);
-          syncedHandDetectionsRef.current = handsResult.hands;
+          // Use ref to get current detection mode (since callback is set once)
+          const currentMode = currentDetectionModeRef.current;
+          console.log(`MediaPipe callback executing with mode: ${currentMode}`);
+
+          // Only update if we're still in a mode that uses hands
+          if (currentMode === "hands" || currentMode === "both") {
+            // Update hand detections in sync
+            setHandDetections(handsResult.hands);
+            syncedHandDetectionsRef.current = handsResult.hands;
+            console.log(
+              `Updated hand detections: ${handsResult.hands.length} hands in ${currentMode} mode`
+            );
+          } else {
+            console.log(
+              `Ignoring hand detection results - current mode is ${currentMode}`
+            );
+          }
         });
 
         handsModelRef.current = hands;
@@ -183,7 +236,16 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     syncedDetectionsRef.current = []; // Clear synced detections too
     syncedHandDetectionsRef.current = []; // Clear synced hand detections
     pendingInferenceRef.current = false; // Reset pending state
-    capturedFrameRef.current = null; // Clear frame reference
+
+    // Clean up canvas references
+    capturedFrameRef.current = null;
+    tempHandCanvasRef.current = null;
+
+    // Reset timing references
+    lastDrawTimeRef.current = 0;
+    lastNailInferenceRef.current = 0;
+    lastHandInferenceRef.current = 0;
+
     if (animationRef.current) {
       cancelAnimationFrame(animationRef.current);
     }
@@ -208,10 +270,36 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       return;
     }
 
-    // Throttle inference to avoid overwhelming the system
     const currentTime = performance.now();
-    if (currentTime - lastInferenceTimeRef.current < 500) {
-      // Reduced to 2 FPS max for inference
+
+    // Staggered inference timing for better performance
+    let shouldRunNails = false;
+    let shouldRunHands = false;
+
+    // Adjust timing based on performance mode
+    const nailInterval = performanceMode ? 1200 : 800; // Slower in performance mode
+    const handInterval = performanceMode ? 1000 : 600; // Slower in performance mode
+    const handDelay =
+      detectionMode === "both" ? (performanceMode ? 600 : 400) : 0;
+
+    if (detectionMode === "nails" || detectionMode === "both") {
+      if (currentTime - lastNailInferenceRef.current > nailInterval) {
+        shouldRunNails = modelRef.current !== null;
+        lastNailInferenceRef.current = currentTime;
+      }
+    }
+
+    if (detectionMode === "hands" || detectionMode === "both") {
+      if (
+        currentTime - lastHandInferenceRef.current >
+        handInterval + handDelay
+      ) {
+        shouldRunHands = handsModelRef.current !== null;
+        lastHandInferenceRef.current = currentTime;
+      }
+    }
+
+    if (!shouldRunNails && !shouldRunHands) {
       return;
     }
 
@@ -219,84 +307,79 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     setIsProcessing(true);
 
     try {
-      // Capture the current video frame for this inference
-      const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-
-      canvas.width = videoWidth;
-      canvas.height = videoHeight;
-      ctx.drawImage(videoRef.current, 0, 0, videoWidth, videoHeight);
-
-      // Store the captured frame for synchronized display
-      capturedFrameRef.current = canvas;
-
-      // Run nail segmentation if enabled and model is loaded
+      // Capture frame only once if we're doing any inference
       if (
-        (detectionMode === "nails" || detectionMode === "both") &&
-        modelRef.current
+        !capturedFrameRef.current ||
+        (shouldRunNails && !capturedFrameRef.current) ||
+        (shouldRunHands && !capturedFrameRef.current)
       ) {
-        const preprocessed = preprocessImageForYolo(videoRef.current);
-
-        // Run model inference
-        const outputs = (await modelRef.current.executeAsync(
-          preprocessed
-        )) as tf.Tensor[];
-
-        console.log(
-          "Nail model outputs:",
-          outputs.map((o) => ({ shape: o.shape, dtype: o.dtype }))
-        );
-
-        // Process YOLO output
-        const result = processYoloOutput(
-          outputs,
-          videoWidth,
-          videoHeight,
-          0.5, // increased confidence threshold
-          0.45 // NMS threshold
-        );
-
-        // Only update detections if this inference is still relevant
-        if (pendingInferenceRef.current) {
-          console.log(
-            `Setting ${result.detections.length} nail detections from inference`
-          );
-          // Update both the state and the synced ref simultaneously
-          setDetections(result.detections);
-          syncedDetectionsRef.current = result.detections;
+        if (!capturedFrameRef.current) {
+          capturedFrameRef.current = document.createElement("canvas");
         }
 
-        // Clean up tensors
-        preprocessed.dispose();
-        outputs.forEach((tensor) => tensor.dispose());
-      } else {
-        // Clear nail detections if not in nail mode
-        setDetections([]);
-        syncedDetectionsRef.current = [];
+        const canvas = capturedFrameRef.current;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+
+        canvas.width = videoWidth;
+        canvas.height = videoHeight;
+        ctx.drawImage(videoRef.current, 0, 0, videoWidth, videoHeight);
       }
 
-      // Run hand detection if enabled and model is loaded
-      if (
-        (detectionMode === "hands" || detectionMode === "both") &&
-        handsModelRef.current
-      ) {
-        // MediaPipe hands expects the video element directly
-        await handsModelRef.current.send({ image: videoRef.current });
-        // Results are handled in the onResults callback set during model loading
-      } else {
-        // Clear hand detections if not in hands mode
-        setHandDetections([]);
-        syncedHandDetectionsRef.current = [];
+      // Run nail segmentation if needed
+      if (shouldRunNails && modelRef.current) {
+        console.log("Running nail inference...");
+
+        // Manual tensor management for async operations
+        const preprocessed = preprocessImageForYolo(videoRef.current!);
+
+        try {
+          const outputs = (await modelRef.current.executeAsync(
+            preprocessed
+          )) as tf.Tensor[];
+
+          const result = processYoloOutput(
+            outputs,
+            videoWidth,
+            videoHeight,
+            0.5, // confidence threshold
+            0.45 // NMS threshold
+          );
+
+          // Only update if still relevant
+          if (pendingInferenceRef.current) {
+            console.log(
+              `Setting ${result.detections.length} nail detections from inference`
+            );
+            setDetections(result.detections);
+            syncedDetectionsRef.current = result.detections;
+          }
+
+          // Clean up tensors
+          outputs.forEach((tensor) => tensor.dispose());
+        } finally {
+          // Always dispose preprocessing tensor
+          preprocessed.dispose();
+        }
       }
 
-      lastInferenceTimeRef.current = currentTime;
+      // Run hand detection if needed (with slight delay to stagger processing)
+      if (shouldRunHands && handsModelRef.current) {
+        console.log("Running hand inference...");
 
-      // Calculate FPS
+        try {
+          await handsModelRef.current.send({ image: videoRef.current });
+        } catch (error) {
+          console.error("Hand detection error:", error);
+        }
+      }
+
+      // Calculate FPS less frequently
       frameCountRef.current++;
       const fpsCurrentTime = performance.now();
-      if (fpsCurrentTime - lastTimeRef.current >= 1000) {
-        setFps(frameCountRef.current);
+      if (fpsCurrentTime - lastTimeRef.current >= 2000) {
+        // Update FPS every 2 seconds
+        setFps(Math.round(frameCountRef.current / 2));
         frameCountRef.current = 0;
         lastTimeRef.current = fpsCurrentTime;
       }
@@ -311,21 +394,23 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       setIsProcessing(false);
       pendingInferenceRef.current = false;
     }
-  }, [isProcessing, detectionMode]);
+  }, [isProcessing, detectionMode, performanceMode]);
 
   // Draw captured frame with detections on canvas
   const drawDetections = useCallback(() => {
-    if (!canvasRef.current || !capturedFrameRef.current) return;
+    if (!canvasRef.current) return;
+
+    const currentTime = performance.now();
+    // Throttle drawing based on performance mode
+    const drawInterval = performanceMode ? 100 : 67; // 10 FPS vs 15 FPS
+    if (currentTime - lastDrawTimeRef.current < drawInterval) {
+      return;
+    }
+    lastDrawTimeRef.current = currentTime;
 
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-
-    const capturedFrame = capturedFrameRef.current;
-    const frameWidth = capturedFrame.width;
-    const frameHeight = capturedFrame.height;
-
-    if (frameWidth === 0 || frameHeight === 0) return;
 
     // Get the video element's display dimensions
     const video = videoRef.current;
@@ -343,10 +428,16 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     // Clear canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Draw the captured frame (this ensures perfect sync between frame and detections)
-    ctx.drawImage(capturedFrame, 0, 0, displayWidth, displayHeight);
+    // Always draw the live video feed first
+    ctx.drawImage(video, 0, 0, displayWidth, displayHeight);
 
-    // Calculate scaling factors (simple since we're drawing the exact frame that was analyzed)
+    // Use captured frame for coordinate calculations if available
+    const frameWidth = capturedFrameRef.current ? capturedFrameRef.current.width : video.videoWidth;
+    const frameHeight = capturedFrameRef.current ? capturedFrameRef.current.height : video.videoHeight;
+
+    if (frameWidth === 0 || frameHeight === 0) return;
+
+    // Calculate scaling factors
     const scaleX = displayWidth / frameWidth;
     const scaleY = displayHeight / frameHeight;
 
@@ -354,9 +445,13 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     const currentDetections = syncedDetectionsRef.current;
     const currentHandDetections = syncedHandDetectionsRef.current;
 
-    console.log(
-      `Drawing ${currentDetections.length} nail detections and ${currentHandDetections.length} hand detections on captured frame`
-    );
+    // Reduce logging frequency for performance
+    if (Math.random() < 0.1) {
+      // Log only 10% of frames
+      console.log(
+        `Drawing ${currentDetections.length} nail detections and ${currentHandDetections.length} hand detections on live feed (mode: ${detectionMode})`
+      );
+    }
 
     // Apply color filter if enabled (only for nails)
     if (
@@ -394,10 +489,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
         const scaledHeight = height * scaleY;
 
         // Validate dimensions
-        if (scaledWidth <= 0 || scaledHeight <= 0) {
-          console.warn(`Skipping nail detection ${index} - invalid dimensions`);
-          return;
-        }
+        if (scaledWidth <= 0 || scaledHeight <= 0) return;
 
         // Clamp coordinates to canvas bounds
         const clampedX = Math.max(0, Math.min(scaledX, canvas.width));
@@ -405,12 +497,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
         const clampedWidth = Math.min(scaledWidth, canvas.width - clampedX);
         const clampedHeight = Math.min(scaledHeight, canvas.height - clampedY);
 
-        if (clampedWidth <= 0 || clampedHeight <= 0) {
-          console.warn(
-            `Skipping nail detection ${index} - out of bounds after clamping`
-          );
-          return;
-        }
+        if (clampedWidth <= 0 || clampedHeight <= 0) return;
 
         // Draw precise boundary if available
         if (detection.maskPolygon && detection.maskPolygon.length > 2) {
@@ -460,93 +547,68 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
           }
         }
 
-        // Draw filled background for label
-        const label = `Nail ${(detection.score * 100).toFixed(1)}%`;
-        ctx.font = "bold 14px Arial";
-        const textMetrics = ctx.measureText(label);
-        const textWidth = textMetrics.width;
-        const textHeight = 20;
+        // Simplified label drawing - skip complex calculations
+        const label = `${(detection.score * 100).toFixed(0)}%`;
+        ctx.font = "bold 12px Arial";
+        const textWidth = ctx.measureText(label).width;
 
-        // Ensure label stays within canvas bounds
+        // Simplified label positioning
         const labelX = Math.max(
           0,
-          Math.min(clampedX, canvas.width - textWidth - 10)
+          Math.min(clampedX, canvas.width - textWidth - 8)
         );
-        const labelY = Math.max(textHeight + 2, clampedY);
+        const labelY = Math.max(16, clampedY);
 
         ctx.fillStyle = "#ff6b9d";
-        ctx.fillRect(
-          labelX,
-          labelY - textHeight - 2,
-          textWidth + 10,
-          textHeight + 4
-        );
+        ctx.fillRect(labelX, labelY - 16, textWidth + 8, 18);
 
-        // Draw label text
         ctx.fillStyle = "white";
-        ctx.fillText(label, labelX + 5, labelY - 5);
+        ctx.fillText(label, labelX + 4, labelY - 3);
 
-        // Draw corner indicators for enhanced UI
-        const cornerSize = Math.min(15, clampedWidth / 4, clampedHeight / 4);
-        ctx.strokeStyle = "#ff6b9d";
-        ctx.lineWidth = 2;
-
-        // Top-left corner
-        ctx.beginPath();
-        ctx.moveTo(clampedX, clampedY + cornerSize);
-        ctx.lineTo(clampedX, clampedY);
-        ctx.lineTo(clampedX + cornerSize, clampedY);
-        ctx.stroke();
-
-        // Top-right corner
-        ctx.beginPath();
-        ctx.moveTo(clampedX + clampedWidth - cornerSize, clampedY);
-        ctx.lineTo(clampedX + clampedWidth, clampedY);
-        ctx.lineTo(clampedX + clampedWidth, clampedY + cornerSize);
-        ctx.stroke();
-
-        // Bottom-left corner
-        ctx.beginPath();
-        ctx.moveTo(clampedX, clampedY + clampedHeight - cornerSize);
-        ctx.lineTo(clampedX, clampedY + clampedHeight);
-        ctx.lineTo(clampedX + cornerSize, clampedY + clampedHeight);
-        ctx.stroke();
-
-        // Bottom-right corner
-        ctx.beginPath();
-        ctx.moveTo(
-          clampedX + clampedWidth - cornerSize,
-          clampedY + clampedHeight
-        );
-        ctx.lineTo(clampedX + clampedWidth, clampedY + clampedHeight);
-        ctx.lineTo(
-          clampedX + clampedWidth,
-          clampedY + clampedHeight - cornerSize
-        );
-        ctx.stroke();
+        // Skip corner indicators to reduce drawing operations
       });
     }
 
-    // Draw hand detections
-    if (detectionMode === "hands" || detectionMode === "both") {
-      // Create a temporary canvas for hand drawing that matches our display canvas
-      const tempCanvas = document.createElement("canvas");
+    // Draw hand detections with optimized approach
+    if (
+      (detectionMode === "hands" || detectionMode === "both") &&
+      currentHandDetections.length > 0
+    ) {
+      // Reuse temporary canvas for hand drawing
+      if (!tempHandCanvasRef.current) {
+        tempHandCanvasRef.current = document.createElement("canvas");
+      }
+
+      const tempCanvas = tempHandCanvasRef.current;
       tempCanvas.width = displayWidth;
       tempCanvas.height = displayHeight;
 
-      drawHandDetections(tempCanvas, currentHandDetections, {
-        drawLandmarks: true,
-        drawConnections: true,
-        landmarkColor: "#00ff00",
-        connectionColor: "#0000ff",
-        landmarkSize: 4,
-        connectionWidth: 2,
-      });
+      // Clear the temp canvas
+      const tempCtx = tempCanvas.getContext("2d");
+      if (tempCtx) {
+        tempCtx.clearRect(0, 0, displayWidth, displayHeight);
 
-      // Draw the hand detection canvas onto our main canvas
-      ctx.drawImage(tempCanvas, 0, 0);
+        drawHandDetections(tempCanvas, currentHandDetections, {
+          drawLandmarks: true,
+          drawConnections: !performanceMode, // Skip connections in performance mode
+          landmarkColor: "#00ff88",
+          connectionColor: "#0088ff",
+          landmarkSize: performanceMode ? 3 : 4, // Smaller in performance mode
+          connectionWidth: performanceMode ? 1 : 2, // Thinner in performance mode
+        });
+
+        // Draw the hand detection canvas onto our main canvas
+        ctx.drawImage(tempCanvas, 0, 0);
+      }
+
+      // Reduce logging for performance
+      if (Math.random() < 0.1) {
+        console.log(
+          `Successfully drew ${currentHandDetections.length} hands onto canvas`
+        );
+      }
     }
-  }, [enableColorFilter, selectedColor, detectionMode]);
+  }, [enableColorFilter, selectedColor, detectionMode, performanceMode]);
 
   // Main processing loop
   const processFrame = useCallback(() => {
@@ -555,23 +617,56 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       videoRef.current &&
       (modelRef.current || handsModelRef.current)
     ) {
-      // Only draw when we have a captured frame with detections
-      if (
-        capturedFrameRef.current &&
-        (syncedDetectionsRef.current.length >= 0 ||
-          syncedHandDetectionsRef.current.length >= 0)
-      ) {
+      const currentTime = performance.now();
+
+      // Always draw the live video feed at a reasonable rate
+      const drawInterval = performanceMode ? 100 : 67; // 10 FPS vs 15 FPS
+      const shouldDraw = currentTime - lastDrawTimeRef.current >= drawInterval;
+
+      if (shouldDraw) {
         drawDetections();
       }
 
-      // Run inference at a controlled rate - this will capture frames and sync detections
+      // Run inference at a much more controlled rate
       if (!pendingInferenceRef.current && !isProcessing) {
-        runInference();
+        // Check if enough time has passed for any inference
+        const timeSinceLastNail = currentTime - lastNailInferenceRef.current;
+        const timeSinceLastHand = currentTime - lastHandInferenceRef.current;
+
+        const nailInterval = performanceMode ? 1200 : 800;
+        const handInterval = performanceMode ? 1000 : 600;
+
+        if (
+          (detectionMode === "nails" && timeSinceLastNail > nailInterval) ||
+          (detectionMode === "hands" && timeSinceLastHand > handInterval) ||
+          (detectionMode === "both" &&
+            (timeSinceLastNail > nailInterval ||
+              timeSinceLastHand > handInterval))
+        ) {
+          runInference();
+        }
       }
 
       animationRef.current = requestAnimationFrame(processFrame);
     }
-  }, [isWebcamActive, runInference, drawDetections, isProcessing]);
+  }, [
+    isWebcamActive,
+    runInference,
+    drawDetections,
+    isProcessing,
+    detectionMode,
+    performanceMode,
+  ]);
+
+  // Handle detection mode changes
+  useEffect(() => {
+    console.log(`Detection mode changed to: ${detectionMode}`);
+    currentDetectionModeRef.current = detectionMode;
+    // Force a redraw when mode changes
+    if (capturedFrameRef.current) {
+      drawDetections();
+    }
+  }, [detectionMode, drawDetections]);
 
   // Effects
   useEffect(() => {
@@ -710,7 +805,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                   </div>
                 </div>
               )}
-              {!capturedFrameRef.current && isWebcamActive && !isProcessing && (
+              {isWebcamActive && (
                 <div className="absolute top-4 left-4 bg-black bg-opacity-50 text-white px-3 py-2 rounded-lg">
                   <div className="text-sm">
                     🔍 Place your hand in front of the camera
@@ -740,7 +835,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
             {(["nails", "hands", "both"] as DetectionMode[]).map((mode) => (
               <button
                 key={mode}
-                onClick={() => setDetectionMode(mode)}
+                onClick={() => handleDetectionModeChange(mode)}
                 disabled={
                   (mode === "nails" && !modelRef.current) ||
                   (mode === "hands" && !handsModelRef.current) ||
@@ -766,6 +861,23 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
               </button>
             ))}
           </div>
+
+          {/* Performance Mode Toggle */}
+          <button
+            onClick={() => setPerformanceMode(!performanceMode)}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+              performanceMode
+                ? "bg-orange-500 hover:bg-orange-600 text-white"
+                : "bg-gray-500 hover:bg-gray-600 text-white"
+            }`}
+            title={
+              performanceMode
+                ? "Performance mode enabled - lower quality but better performance"
+                : "Quality mode - higher quality but may impact performance"
+            }
+          >
+            {performanceMode ? "⚡ Performance" : "🎯 Quality"}
+          </button>
 
           {/* Color Filter Toggle */}
           <button
@@ -898,7 +1010,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
 
         {/* Stats */}
         {isWebcamActive && (
-          <div className="mt-4 grid grid-cols-2 md:grid-cols-6 gap-4 text-center">
+          <div className="mt-4 grid grid-cols-2 md:grid-cols-7 gap-4 text-center">
             <div className="bg-pink-50 rounded-lg p-3">
               <div className="text-2xl font-bold text-pink-600">
                 {detections.length}
@@ -939,6 +1051,12 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                 {detectionMode.toUpperCase()}
               </div>
               <div className="text-sm text-gray-600">Detection Mode</div>
+            </div>
+            <div className="bg-red-50 rounded-lg p-3">
+              <div className="text-2xl font-bold text-red-600">
+                {tf.memory().numTensors}
+              </div>
+              <div className="text-sm text-gray-600">Memory (Tensors)</div>
             </div>
           </div>
         )}

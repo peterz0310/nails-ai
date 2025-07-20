@@ -57,24 +57,30 @@ export const initializeMediaPipeHands = async (): Promise<MediaPipeHands> => {
     return handsModel;
   }
 
-  // Dynamic import to avoid SSR issues
-  const { Hands } = await import("@mediapipe/hands");
+  try {
+    // Dynamic import to avoid SSR issues
+    const { Hands } = await import("@mediapipe/hands");
 
-  const hands = new Hands({
-    locateFile: (file: string) => {
-      return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
-    },
-  });
+    const hands = new Hands({
+      locateFile: (file: string) => {
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+      },
+    });
 
-  hands.setOptions({
-    maxNumHands: 2,
-    modelComplexity: 1,
-    minDetectionConfidence: 0.5,
-    minTrackingConfidence: 0.5,
-  });
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 0, // Reduced from 1 to 0 for better performance
+      minDetectionConfidence: 0.7, // Increased to reduce false positives and processing
+      minTrackingConfidence: 0.7, // Increased for better stability and less processing
+    });
 
-  handsModel = hands as MediaPipeHands;
-  return handsModel;
+    handsModel = hands as MediaPipeHands;
+    console.log("MediaPipe Hands model initialized successfully");
+    return handsModel;
+  } catch (error) {
+    console.error("Failed to initialize MediaPipe Hands:", error);
+    throw error;
+  }
 };
 
 export const processMediaPipeResults = (
@@ -124,9 +130,21 @@ export const drawHandDetections = (
   }
 ): void => {
   const ctx = canvas.getContext("2d");
-  if (!ctx) return;
+  if (!ctx || !hands || hands.length === 0) {
+    console.log("No hands to draw or invalid canvas context");
+    return;
+  }
 
-  hands.forEach((hand) => {
+  console.log(
+    `Drawing ${hands.length} hands on canvas ${canvas.width}x${canvas.height}`
+  );
+
+  hands.forEach((hand, handIndex) => {
+    if (!hand.landmarks || hand.landmarks.length === 0) {
+      console.warn(`Hand ${handIndex} has no landmarks`);
+      return;
+    }
+
     // Convert normalized coordinates to canvas coordinates
     const canvasLandmarks = hand.landmarks.map((landmark) => ({
       x: landmark.x * canvas.width,
@@ -139,13 +157,15 @@ export const drawHandDetections = (
       ctx.lineWidth = options.connectionWidth;
 
       HAND_CONNECTIONS.forEach(([start, end]) => {
-        const startPoint = canvasLandmarks[start];
-        const endPoint = canvasLandmarks[end];
+        if (start < canvasLandmarks.length && end < canvasLandmarks.length) {
+          const startPoint = canvasLandmarks[start];
+          const endPoint = canvasLandmarks[end];
 
-        ctx.beginPath();
-        ctx.moveTo(startPoint.x, startPoint.y);
-        ctx.lineTo(endPoint.x, endPoint.y);
-        ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(startPoint.x, startPoint.y);
+          ctx.lineTo(endPoint.x, endPoint.y);
+          ctx.stroke();
+        }
       });
     }
 
@@ -174,6 +194,10 @@ export const drawHandDetections = (
         wristPoint.y - 15
       );
     }
+
+    console.log(
+      `Drew hand ${handIndex}: ${hand.handedness} with ${canvasLandmarks.length} landmarks`
+    );
   });
 };
 
