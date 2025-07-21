@@ -66,7 +66,6 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   }); // Default pink
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [enableColorFilter, setEnableColorFilter] = useState(false);
-  const [performanceMode, setPerformanceMode] = useState(true); // Default to performance mode
 
   // Detection mode change handler with cleanup
   const handleDetectionModeChange = useCallback(
@@ -78,18 +77,21 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       // Clear existing detections when switching modes
       if (newMode !== detectionMode) {
         if (newMode === "nails") {
-          // Switching to nails-only: clear hands and matches
+          // Switching to nails-only: clear hands and matches immediately
           setHandDetections([]);
           syncedHandDetectionsRef.current = [];
           setNailFingerMatches([]);
+          console.log("Cleared hand detections for nails-only mode");
         } else if (newMode === "hands") {
-          // Switching to hands-only: clear nails and matches
+          // Switching to hands-only: clear nails and matches immediately
           setDetections([]);
           syncedDetectionsRef.current = [];
           setNailFingerMatches([]);
+          console.log("Cleared nail detections for hands-only mode");
         } else if (newMode === "both") {
           // Switching to both: clear matches to recalculate, keep existing detections
           setNailFingerMatches([]);
+          console.log("Cleared matches for both mode - will recalculate");
         }
       }
 
@@ -103,6 +105,25 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
 
       // Clear captured frame to force fresh capture with new mode
       capturedFrameRef.current = null;
+
+      // Force immediate canvas clearing and redraw with new mode
+      if (canvasRef.current && videoRef.current) {
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          // Clear the canvas
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+          // Draw fresh video frame without any detections
+          const video = videoRef.current;
+          if (video.videoWidth > 0 && video.videoHeight > 0) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          }
+        }
+      }
+
+      // Reset drawing time to force immediate redraw
+      lastDrawTimeRef.current = 0;
 
       console.log(`Mode switch complete. New mode: ${newMode}`);
     },
@@ -211,6 +232,14 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
               if (currentMode === "both") {
                 setNailFingerMatches([]);
               }
+            }
+          } else if (currentMode === "nails") {
+            // If we're in nails-only mode, immediately clear any hand detections
+            // This ensures hands don't persist when switching to nails mode
+            if (syncedHandDetectionsRef.current.length > 0) {
+              setHandDetections([]);
+              syncedHandDetectionsRef.current = [];
+              setNailFingerMatches([]);
             }
           }
           // If we're in nails-only mode, ignore hand detection results entirely
@@ -322,11 +351,10 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     let shouldRunNails = false;
     let shouldRunHands = false;
 
-    // Adjust timing based on performance mode
-    const nailInterval = performanceMode ? 1200 : 800; // Slower in performance mode
-    const handInterval = performanceMode ? 1000 : 600; // Slower in performance mode
-    const handDelay =
-      detectionMode === "both" ? (performanceMode ? 600 : 400) : 0;
+    // Quality mode timing (higher quality, better performance)
+    const nailInterval = 800; // Quality mode
+    const handInterval = 600; // Quality mode
+    const handDelay = detectionMode === "both" ? 400 : 0;
 
     // Only run nail inference if we're in nails or both mode AND have the model
     if (
@@ -398,17 +426,21 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
             0.45 // NMS threshold
           );
 
-          // Only update if still relevant
-          if (pendingInferenceRef.current) {
+          // Only update if still relevant and we're in the right mode
+          if (
+            pendingInferenceRef.current &&
+            (currentDetectionModeRef.current === "nails" ||
+              currentDetectionModeRef.current === "both")
+          ) {
             console.log(
-              `Setting ${result.detections.length} nail detections from inference`
+              `Setting ${result.detections.length} nail detections from inference (mode: ${currentDetectionModeRef.current})`
             );
             setDetections(result.detections);
             syncedDetectionsRef.current = result.detections;
 
             // Calculate nail-finger matches if we have both models active
             if (
-              detectionMode === "both" &&
+              currentDetectionModeRef.current === "both" &&
               syncedHandDetectionsRef.current.length > 0
             ) {
               const matches = matchNailsToFingertips(
@@ -463,7 +495,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       setIsProcessing(false);
       pendingInferenceRef.current = false;
     }
-  }, [isProcessing, detectionMode, performanceMode]);
+  }, [isProcessing, detectionMode]);
 
   // Draw captured frame with detections on canvas
   const drawDetections = useCallback(() => {
@@ -471,7 +503,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
 
     const currentTime = performance.now();
     // Reduce throttling to minimize flashing - more frequent drawing
-    const drawInterval = performanceMode ? 50 : 33; // 20 FPS vs 30 FPS
+    const drawInterval = 33; // 30 FPS (quality mode)
     if (currentTime - lastDrawTimeRef.current < drawInterval) {
       return;
     }
@@ -530,8 +562,12 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     const scaleY = displayHeight / frameHeight;
 
     // Use synced detections that match the displayed frame
-    const currentDetections = syncedDetectionsRef.current;
-    const currentHandDetections = syncedHandDetectionsRef.current;
+    // BUT strictly filter based on current detection mode
+    const currentDetections =
+      detectionMode === "hands" ? [] : syncedDetectionsRef.current;
+    const currentHandDetections =
+      detectionMode === "nails" ? [] : syncedHandDetectionsRef.current;
+    const currentMatches = detectionMode === "both" ? nailFingerMatches : [];
 
     // Reduce logging frequency for performance
     if (Math.random() < 0.05) {
@@ -697,8 +733,8 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
           drawConnections: true,
           landmarkColor: "#00ff88",
           connectionColor: "#0088ff",
-          landmarkSize: performanceMode ? 3 : 4,
-          connectionWidth: performanceMode ? 1 : 2,
+          landmarkSize: 4, // Quality mode
+          connectionWidth: 2, // Quality mode
         });
 
         // Draw the hand detection canvas onto our main canvas
@@ -707,21 +743,15 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     }
 
     // Draw nail-finger matches if we have both types of detections
-    if (detectionMode === "both" && nailFingerMatches.length > 0) {
-      drawNailFingerMatches(ctx, nailFingerMatches, scaleX, scaleY);
+    if (detectionMode === "both" && currentMatches.length > 0) {
+      drawNailFingerMatches(ctx, currentMatches, scaleX, scaleY);
 
       // Log match info occasionally
       if (Math.random() < 0.02) {
-        console.log(`Drew ${nailFingerMatches.length} nail-finger matches`);
+        console.log(`Drew ${currentMatches.length} nail-finger matches`);
       }
     }
-  }, [
-    enableColorFilter,
-    selectedColor,
-    detectionMode,
-    performanceMode,
-    nailFingerMatches,
-  ]);
+  }, [enableColorFilter, selectedColor, detectionMode, nailFingerMatches]);
 
   // Main processing loop
   const processFrame = useCallback(() => {
@@ -733,7 +763,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       const currentTime = performance.now();
 
       // Always draw at a reasonable rate, but only when we have something to show
-      const drawInterval = performanceMode ? 50 : 33; // Match the drawDetections throttling
+      const drawInterval = 33; // 30 FPS (quality mode)
       const shouldDraw = currentTime - lastDrawTimeRef.current >= drawInterval;
 
       if (shouldDraw) {
@@ -746,8 +776,8 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
         const timeSinceLastNail = currentTime - lastNailInferenceRef.current;
         const timeSinceLastHand = currentTime - lastHandInferenceRef.current;
 
-        const nailInterval = performanceMode ? 1200 : 800;
-        const handInterval = performanceMode ? 1000 : 600;
+        const nailInterval = 800; // Quality mode
+        const handInterval = 600; // Quality mode
 
         let shouldRunInference = false;
 
@@ -790,18 +820,23 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     drawDetections,
     isProcessing,
     detectionMode,
-    performanceMode,
   ]);
 
   // Handle detection mode changes
   useEffect(() => {
     console.log(`Detection mode changed to: ${detectionMode}`);
     currentDetectionModeRef.current = detectionMode;
-    // Force a redraw when mode changes
-    if (capturedFrameRef.current) {
-      drawDetections();
+
+    // Force immediate redraw when mode changes by resetting draw timing
+    lastDrawTimeRef.current = 0;
+
+    // Force a redraw immediately to show the mode change
+    if (isWebcamActive && canvasRef.current && videoRef.current) {
+      setTimeout(() => {
+        drawDetections();
+      }, 50); // Small delay to ensure state has updated
     }
-  }, [detectionMode, drawDetections]);
+  }, [detectionMode, drawDetections, isWebcamActive]);
 
   // Effects
   useEffect(() => {
@@ -879,11 +914,10 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                 ? "👋"
                 : "💅👋"}
               {detectionMode === "nails"
-                ? "Nail Detection"
+                ? "Nail Detection & Analysis"
                 : detectionMode === "hands"
-                ? "Hand Detection"
-                : "Nail & Hand Detection"}{" "}
-              Camera
+                ? "Hand Tracking & Analysis"
+                : "Nail & Hand AI Analysis"}
               {fps > 0 && (
                 <span className="text-sm bg-blue-100 text-blue-800 px-2 py-1 rounded">
                   {fps} FPS
@@ -996,23 +1030,6 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
               </button>
             ))}
           </div>
-
-          {/* Performance Mode Toggle */}
-          <button
-            onClick={() => setPerformanceMode(!performanceMode)}
-            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-              performanceMode
-                ? "bg-orange-500 hover:bg-orange-600 text-white"
-                : "bg-gray-500 hover:bg-gray-600 text-white"
-            }`}
-            title={
-              performanceMode
-                ? "Performance mode enabled - lower quality but better performance"
-                : "Quality mode - higher quality but may impact performance"
-            }
-          >
-            {performanceMode ? "⚡ Performance" : "🎯 Quality"}
-          </button>
 
           {/* Color Filter Toggle */}
           <button
@@ -1145,7 +1162,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
 
         {/* Stats */}
         {isWebcamActive && (
-          <div className="mt-4 grid grid-cols-2 md:grid-cols-8 gap-4 text-center">
+          <div className="mt-4 grid grid-cols-2 md:grid-cols-6 gap-4 text-center">
             <div className="bg-pink-50 rounded-lg p-3">
               <div className="text-2xl font-bold text-pink-600">
                 {detections.length}
@@ -1181,18 +1198,6 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
               <div className="text-2xl font-bold text-purple-600">{fps}</div>
               <div className="text-sm text-gray-600">FPS</div>
             </div>
-            <div className="bg-orange-50 rounded-lg p-3">
-              <div className="text-2xl font-bold text-orange-600">
-                {detections.some((d) => d.maskPolygon) ? "✓" : "○"}
-              </div>
-              <div className="text-sm text-gray-600">Precise Bounds</div>
-            </div>
-            <div className="bg-indigo-50 rounded-lg p-3">
-              <div className="text-2xl font-bold text-indigo-600">
-                {detectionMode.toUpperCase()}
-              </div>
-              <div className="text-sm text-gray-600">Detection Mode</div>
-            </div>
             <div className="bg-red-50 rounded-lg p-3">
               <div className="text-2xl font-bold text-red-600">
                 {tf.memory().numTensors}
@@ -1215,11 +1220,6 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                 >
                   <div className="flex items-center gap-2">
                     <span>💅 Nail #{index + 1}</span>
-                    {detection.maskPolygon && (
-                      <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded">
-                        Precise
-                      </span>
-                    )}
                     {detection.mask && (
                       <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded">
                         Mask
