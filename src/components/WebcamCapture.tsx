@@ -65,6 +65,57 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [enableColorFilter, setEnableColorFilter] = useState(false);
 
+  // Add smoothing for nail orientations to reduce jitter
+  const nailOrientationHistoryRef = useRef<Map<string, number[]>>(new Map());
+  const smoothingWindowSize = 5; // Number of frames to average
+
+  // Smooth nail orientations to reduce jitter
+  const smoothNailOrientations = useCallback(
+    (matches: NailFingerMatch[]): NailFingerMatch[] => {
+      const history = nailOrientationHistoryRef.current;
+
+      return matches.map((match) => {
+        // Create a unique key for this nail (hand + finger)
+        const key = `${match.handedness}_${match.fingertipIndex}`;
+
+        // Get or create history for this nail
+        if (!history.has(key)) {
+          history.set(key, []);
+        }
+
+        const angles = history.get(key)!;
+
+        // Add current angle to history
+        angles.push(match.nailAngle);
+
+        // Keep only the last N angles
+        if (angles.length > smoothingWindowSize) {
+          angles.shift();
+        }
+
+        // Calculate smoothed angle using circular mean for angles
+        let sumSin = 0;
+        let sumCos = 0;
+        angles.forEach((angle) => {
+          sumSin += Math.sin(angle);
+          sumCos += Math.cos(angle);
+        });
+
+        const smoothedAngle = Math.atan2(
+          sumSin / angles.length,
+          sumCos / angles.length
+        );
+
+        // Return match with smoothed angle
+        return {
+          ...match,
+          nailAngle: smoothedAngle,
+        };
+      });
+    },
+    [smoothingWindowSize]
+  );
+
   // Detection mode change handler with cleanup
   const handleDetectionModeChange = useCallback(
     (newMode: DetectionMode) => {
@@ -89,6 +140,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
         } else if (newMode === "both") {
           // Switching to both: clear matches to recalculate, keep existing detections
           setNailFingerMatches([]);
+          nailOrientationHistoryRef.current.clear(); // Clear smoothing history
           console.log("Cleared matches for both mode - will recalculate");
         }
       }
@@ -211,7 +263,8 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                     video.videoWidth,
                     video.videoHeight
                   );
-                  setNailFingerMatches(matches);
+                  const smoothedMatches = smoothNailOrientations(matches);
+                  setNailFingerMatches(smoothedMatches);
                   console.log(
                     `Updated nail-finger matches from hand detection: ${matches.length} matches found`
                   );
@@ -301,6 +354,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     setDetections([]); // Clear detections when stopping
     setHandDetections([]); // Clear hand detections
     setNailFingerMatches([]); // Clear nail-finger matches
+    nailOrientationHistoryRef.current.clear(); // Clear smoothing history
     syncedDetectionsRef.current = []; // Clear synced detections too
     syncedHandDetectionsRef.current = []; // Clear synced hand detections
     pendingInferenceRef.current = false; // Reset pending state
@@ -433,7 +487,8 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                 videoWidth,
                 videoHeight
               );
-              setNailFingerMatches(matches);
+              const smoothedMatches = smoothNailOrientations(matches);
+              setNailFingerMatches(smoothedMatches);
             }
           }
 

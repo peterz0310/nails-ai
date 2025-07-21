@@ -55,55 +55,124 @@ function calculateNailCentroid(detection: YoloDetection): [number, number] {
 }
 
 /**
- * Calculate nail dimensions from detection
+ * Calculate nail dimensions and orientation with finger direction constraint
  */
-function calculateNailDimensions(detection: YoloDetection): {
+function calculateNailDimensions(
+  detection: YoloDetection,
+  fingerDirection?: [number, number]
+): {
   width: number;
   height: number;
   angle: number;
 } {
   if (detection.maskPolygon && detection.maskPolygon.length > 4) {
-    // For polygons, find the oriented bounding box
+    // For polygons, use Principal Component Analysis for better orientation
     const polygon = detection.maskPolygon;
 
-    // Simple approach: find the longest and shortest distances between points
-    let maxDistance = 0;
-    let minDistance = Infinity;
-    let primaryAxis: [number, number] = [1, 0];
+    // Calculate centroid
+    const centroidX =
+      polygon.reduce((sum, p) => sum + p[0], 0) / polygon.length;
+    const centroidY =
+      polygon.reduce((sum, p) => sum + p[1], 0) / polygon.length;
 
-    for (let i = 0; i < polygon.length; i++) {
-      for (let j = i + 1; j < polygon.length; j++) {
-        const dx = polygon[j][0] - polygon[i][0];
-        const dy = polygon[j][1] - polygon[i][1];
-        const distance = Math.sqrt(dx * dx + dy * dy);
+    // Calculate covariance matrix elements
+    let cxx = 0,
+      cxy = 0,
+      cyy = 0;
+    polygon.forEach((point) => {
+      const dx = point[0] - centroidX;
+      const dy = point[1] - centroidY;
+      cxx += dx * dx;
+      cxy += dx * dy;
+      cyy += dy * dy;
+    });
 
-        if (distance > maxDistance) {
-          maxDistance = distance;
-          // Store the direction of the longest axis (likely nail length)
-          primaryAxis = [dx / distance, dy / distance];
+    // Normalize by number of points
+    cxx /= polygon.length;
+    cxy /= polygon.length;
+    cyy /= polygon.length;
+
+    // Find eigenvalues and eigenvectors
+    const trace = cxx + cyy;
+    const det = cxx * cyy - cxy * cxy;
+    const lambda1 = (trace + Math.sqrt(trace * trace - 4 * det)) / 2;
+    const lambda2 = (trace - Math.sqrt(trace * trace - 4 * det)) / 2;
+
+    // Principal direction (eigenvector corresponding to larger eigenvalue)
+    let primaryDirection: [number, number];
+    if (Math.abs(cxy) > 1e-6) {
+      primaryDirection = [lambda1 - cyy, cxy];
+      const norm = Math.sqrt(
+        primaryDirection[0] * primaryDirection[0] +
+          primaryDirection[1] * primaryDirection[1]
+      );
+      primaryDirection = [
+        primaryDirection[0] / norm,
+        primaryDirection[1] / norm,
+      ];
+    } else {
+      primaryDirection = cxx > cyy ? [1, 0] : [0, 1];
+    }
+
+    // If we have finger direction, constrain nail orientation
+    let finalDirection = primaryDirection;
+    if (fingerDirection) {
+      // Calculate dot product to see alignment
+      const dot =
+        primaryDirection[0] * fingerDirection[0] +
+        primaryDirection[1] * fingerDirection[1];
+
+      // If the directions are more perpendicular than parallel, flip the nail direction
+      if (Math.abs(dot) < 0.7) {
+        // Allow some deviation but prefer alignment
+        // Try the perpendicular direction
+        const perpDirection: [number, number] = [
+          -primaryDirection[1],
+          primaryDirection[0],
+        ];
+        const perpDot =
+          perpDirection[0] * fingerDirection[0] +
+          perpDirection[1] * fingerDirection[1];
+
+        if (Math.abs(perpDot) > Math.abs(dot)) {
+          finalDirection = perpDirection;
         }
-        if (distance < minDistance && distance > 5) {
-          // Avoid noise
-          minDistance = distance;
-        }
+      }
+
+      // Ensure direction points roughly in the same direction as finger
+      const finalDot =
+        finalDirection[0] * fingerDirection[0] +
+        finalDirection[1] * fingerDirection[1];
+      if (finalDot < 0) {
+        finalDirection = [-finalDirection[0], -finalDirection[1]];
       }
     }
 
-    // Calculate angle from primary axis
-    const angle = Math.atan2(primaryAxis[1], primaryAxis[0]);
+    const angle = Math.atan2(finalDirection[1], finalDirection[0]);
+
+    // Calculate dimensions based on eigenvalues
+    const width = Math.sqrt(lambda1) * 4; // Scale factor to get reasonable dimensions
+    const height = Math.sqrt(lambda2) * 4;
 
     return {
-      width: Math.max(maxDistance * 0.6, minDistance), // Conservative estimate
-      height: Math.min(maxDistance * 0.4, minDistance),
-      angle: angle,
+      width: Math.max(width, height), // Ensure width is the longer dimension
+      height: Math.min(width, height),
+      angle: width > height ? angle : angle + Math.PI / 2,
     };
   } else {
-    // Fallback to bounding box
+    // Fallback to bounding box with finger direction constraint
     const [, , width, height] = detection.bbox;
+    let angle = width > height ? 0 : Math.PI / 2;
+
+    // If we have finger direction, align with it
+    if (fingerDirection) {
+      angle = Math.atan2(fingerDirection[1], fingerDirection[0]);
+    }
+
     return {
-      width: Math.max(width, height), // Assume longer dimension is width
+      width: Math.max(width, height),
       height: Math.min(width, height),
-      angle: width > height ? 0 : Math.PI / 2, // Guess orientation
+      angle: angle,
     };
   }
 }
@@ -111,7 +180,10 @@ function calculateNailDimensions(detection: YoloDetection): {
 /**
  * Calculate distance between two points
  */
-function distance(p1: [number, number], p2: [number, number]): number {
+function distanceBetweenPoints(
+  p1: [number, number],
+  p2: [number, number]
+): number {
   const dx = p1[0] - p2[0];
   const dy = p1[1] - p2[1];
   return Math.sqrt(dx * dx + dy * dy);
@@ -194,7 +266,7 @@ export function matchNailsToFingertips(
 
       nailDetections.forEach((detection, detectionIndex) => {
         const nailCentroid = calculateNailCentroid(detection);
-        const dist = distance(fingertipPos, nailCentroid);
+        const dist = distanceBetweenPoints(fingertipPos, nailCentroid);
 
         // Improved size filtering
         const nailArea = detection.bbox[2] * detection.bbox[3];
@@ -256,12 +328,18 @@ export function matchNailsToFingertips(
       });
 
       // If we found a good match, create the nail-finger match
-      if (bestMatch) {
+      if (bestMatch !== null) {
         const fingerDirection = calculateFingerDirection(hand, fingerIndex);
+        // @ts-ignore - TypeScript has trouble with the null check but this is safe
         const nailCentroid = calculateNailCentroid(bestMatch.detection);
-        const nailDimensions = calculateNailDimensions(bestMatch.detection);
+        // @ts-ignore - TypeScript has trouble with the null check but this is safe
+        const nailDimensions = calculateNailDimensions(
+          bestMatch.detection,
+          fingerDirection
+        );
 
         const match: NailFingerMatch = {
+          // @ts-ignore - TypeScript has trouble with the null check but this is safe
           nailDetection: bestMatch.detection,
           fingertipIndex: tipIndex,
           fingertipPosition: fingertipPos,
@@ -270,6 +348,7 @@ export function matchNailsToFingertips(
           nailWidth: nailDimensions.width,
           nailHeight: nailDimensions.height,
           nailAngle: nailDimensions.angle,
+          // @ts-ignore - TypeScript has trouble with the null check but this is safe
           matchConfidence: bestMatch.confidence,
           handIndex: handIndex,
           handedness: hand.handedness as "Left" | "Right",
@@ -280,7 +359,9 @@ export function matchNailsToFingertips(
         console.log(
           `✓ Matched nail to ${hand.handedness} ${FINGER_NAMES[fingerIndex]} finger:`,
           {
+            // @ts-ignore - TypeScript has trouble with the null check but this is safe
             confidence: bestMatch.confidence.toFixed(3),
+            // @ts-ignore - TypeScript has trouble with the null check but this is safe
             distance: bestMatch.distance.toFixed(1),
             nailSize: `${nailDimensions.width.toFixed(
               1
@@ -328,7 +409,7 @@ export function matchNailsToFingertips(
 }
 
 /**
- * Draw nail-finger matches for debugging
+ * Draw nail-finger matches with improved visualization
  */
 export function drawNailFingerMatches(
   ctx: CanvasRenderingContext2D,
@@ -346,50 +427,119 @@ export function drawNailFingerMatches(
       match.fingertipPosition[1] * scaleY,
     ];
 
-    // Draw connection line
-    ctx.strokeStyle = "#00ff00";
+    // Draw connection line with better visibility
+    ctx.strokeStyle = "#00ff88";
     ctx.lineWidth = 2;
-    ctx.setLineDash([5, 5]);
+    ctx.setLineDash([8, 4]);
     ctx.beginPath();
     ctx.moveTo(scaledCentroid[0], scaledCentroid[1]);
     ctx.lineTo(scaledFingertip[0], scaledFingertip[1]);
     ctx.stroke();
 
-    // Draw nail centroid
-    ctx.fillStyle = "#00ff00";
+    // Draw nail centroid as a larger, more visible dot
+    ctx.fillStyle = "#00ff88";
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([]);
     ctx.beginPath();
-    ctx.arc(scaledCentroid[0], scaledCentroid[1], 4, 0, 2 * Math.PI);
+    ctx.arc(scaledCentroid[0], scaledCentroid[1], 6, 0, 2 * Math.PI);
     ctx.fill();
+    ctx.stroke();
 
-    // Draw nail orientation indicator
-    const dirLength = 20;
+    // Draw fingertip position for reference
+    ctx.fillStyle = "#0088ff";
+    ctx.strokeStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.arc(scaledFingertip[0], scaledFingertip[1], 4, 0, 2 * Math.PI);
+    ctx.fill();
+    ctx.stroke();
+
+    // Draw improved nail orientation indicator
+    const dirLength = Math.max(
+      30,
+      Math.min(match.nailWidth, match.nailHeight) *
+        Math.max(scaleX, scaleY) *
+        0.6
+    );
     const dirX = Math.cos(match.nailAngle) * dirLength;
     const dirY = Math.sin(match.nailAngle) * dirLength;
 
+    // Main orientation line (thicker, more visible)
     ctx.strokeStyle = "#ff00ff";
-    ctx.lineWidth = 3;
+    ctx.lineWidth = 4;
     ctx.setLineDash([]);
     ctx.beginPath();
     ctx.moveTo(scaledCentroid[0] - dirX, scaledCentroid[1] - dirY);
     ctx.lineTo(scaledCentroid[0] + dirX, scaledCentroid[1] + dirY);
     ctx.stroke();
 
-    // Draw confidence and finger info
+    // Add arrow heads to show direction
+    const arrowSize = 8;
+    const arrowAngle = Math.PI / 6; // 30 degrees
+
+    // Arrow head at the positive end
+    const endX = scaledCentroid[0] + dirX;
+    const endY = scaledCentroid[1] + dirY;
+
+    ctx.beginPath();
+    ctx.moveTo(endX, endY);
+    ctx.lineTo(
+      endX - arrowSize * Math.cos(match.nailAngle - arrowAngle),
+      endY - arrowSize * Math.sin(match.nailAngle - arrowAngle)
+    );
+    ctx.moveTo(endX, endY);
+    ctx.lineTo(
+      endX - arrowSize * Math.cos(match.nailAngle + arrowAngle),
+      endY - arrowSize * Math.sin(match.nailAngle + arrowAngle)
+    );
+    ctx.stroke();
+
+    // Draw finger direction for comparison (thinner, different color)
+    const fingerDirLength = dirLength * 0.8;
+    const fingerDirX = match.fingerDirection[0] * fingerDirLength;
+    const fingerDirY = match.fingerDirection[1] * fingerDirLength;
+
+    ctx.strokeStyle = "#ffaa00";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(scaledFingertip[0], scaledFingertip[1]);
+    ctx.lineTo(
+      scaledFingertip[0] + fingerDirX,
+      scaledFingertip[1] + fingerDirY
+    );
+    ctx.stroke();
+
+    // Draw confidence and finger info with better styling
     const fingerName =
       FINGER_NAMES[FINGER_TIPS.indexOf(match.fingertipIndex)] || "Unknown";
-    const label = `${match.handedness} ${fingerName} (${(
-      match.matchConfidence * 100
-    ).toFixed(0)}%)`;
+    const label = `${match.handedness} ${fingerName}`;
+    const confLabel = `${(match.matchConfidence * 100).toFixed(0)}%`;
+    const angleLabel = `${((match.nailAngle * 180) / Math.PI).toFixed(0)}°`;
 
-    ctx.font = "bold 11px Arial";
-    ctx.fillStyle = "#000000";
+    ctx.font = "bold 12px Arial";
+    const labelWidth =
+      Math.max(
+        ctx.measureText(label).width,
+        ctx.measureText(confLabel).width,
+        ctx.measureText(angleLabel).width
+      ) + 8;
+
+    // Background for better readability
+    ctx.fillStyle = "rgba(0, 0, 0, 0.8)";
     ctx.fillRect(
-      scaledCentroid[0] + 8,
-      scaledCentroid[1] - 25,
-      ctx.measureText(label).width + 6,
-      20
+      scaledCentroid[0] + 12,
+      scaledCentroid[1] - 35,
+      labelWidth,
+      45
     );
+
+    // Text labels
     ctx.fillStyle = "#ffffff";
-    ctx.fillText(label, scaledCentroid[0] + 11, scaledCentroid[1] - 10);
+    ctx.fillText(label, scaledCentroid[0] + 16, scaledCentroid[1] - 20);
+    ctx.fillStyle = "#00ff88";
+    ctx.fillText(confLabel, scaledCentroid[0] + 16, scaledCentroid[1] - 5);
+    ctx.fillStyle = "#ff00ff";
+    ctx.fillText(angleLabel, scaledCentroid[0] + 16, scaledCentroid[1] + 10);
   });
 }
