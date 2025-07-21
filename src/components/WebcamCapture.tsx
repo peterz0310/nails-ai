@@ -22,6 +22,10 @@ import {
   drawNailFingerMatches,
   NailFingerMatch,
 } from "../utils/nailMatching";
+import {
+  ThreeNailOverlay,
+  ThreeNailOverlayConfig,
+} from "../utils/threeNailOverlay";
 
 interface WebcamCaptureProps {
   onModelLoaded: (loaded: boolean) => void;
@@ -64,6 +68,14 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   }); // Default pink
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [enableColorFilter, setEnableColorFilter] = useState(false);
+
+  // 3D Overlay state and controls
+  const [show3DOverlay, setShow3DOverlay] = useState(false);
+  const [show3DWireframe, setShow3DWireframe] = useState(false);
+  const [nail3DOpacity, setNail3DOpacity] = useState(0.8);
+  const [nail3DThickness, setNail3DThickness] = useState(8);
+  const threeOverlayRef = useRef<ThreeNailOverlay | null>(null);
+  const threeContainerRef = useRef<HTMLDivElement>(null);
 
   // Add smoothing for nail orientations to reduce jitter
   const nailOrientationHistoryRef = useRef<Map<string, number[]>>(new Map());
@@ -724,6 +736,24 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     // Draw nail-finger matches if we have both types of detections
     if (detectionMode === "both" && currentMatches.length > 0) {
       drawNailFingerMatches(ctx, currentMatches, scaleX, scaleY);
+
+      // Update 3D overlay if enabled
+      if (show3DOverlay && threeOverlayRef.current) {
+        // Update canvas size if needed
+        if (
+          canvas.width !== threeOverlayRef.current.getConfig().canvasWidth ||
+          canvas.height !== threeOverlayRef.current.getConfig().canvasHeight
+        ) {
+          threeOverlayRef.current.resize(canvas.width, canvas.height);
+        }
+
+        // Update 3D nail overlays with current matches
+        threeOverlayRef.current.updateNailOverlays(
+          currentMatches,
+          scaleX,
+          scaleY
+        );
+      }
     }
   }, [enableColorFilter, selectedColor, detectionMode, nailFingerMatches]);
 
@@ -869,6 +899,69 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     };
   }, []);
 
+  // 3D Overlay initialization and cleanup
+  useEffect(() => {
+    if (
+      show3DOverlay &&
+      threeContainerRef.current &&
+      !threeOverlayRef.current
+    ) {
+      const container = threeContainerRef.current;
+      const canvas = canvasRef.current;
+
+      if (canvas) {
+        const config: ThreeNailOverlayConfig = {
+          canvasWidth: canvas.width || 640,
+          canvasHeight: canvas.height || 640,
+          videoWidth: videoRef.current?.videoWidth || 640,
+          videoHeight: videoRef.current?.videoHeight || 640,
+          enableLighting: true,
+          nailThickness: nail3DThickness,
+          nailOpacity: nail3DOpacity,
+          showWireframe: show3DWireframe,
+        };
+
+        try {
+          threeOverlayRef.current = new ThreeNailOverlay(container, config);
+          console.log("3D nail overlay initialized");
+        } catch (error) {
+          console.error("Failed to initialize 3D overlay:", error);
+          setShow3DOverlay(false);
+        }
+      }
+    } else if (!show3DOverlay && threeOverlayRef.current) {
+      threeOverlayRef.current.dispose();
+      threeOverlayRef.current = null;
+      console.log("3D nail overlay disposed");
+    }
+
+    return () => {
+      if (threeOverlayRef.current) {
+        threeOverlayRef.current.dispose();
+        threeOverlayRef.current = null;
+      }
+    };
+  }, [show3DOverlay, nail3DThickness, nail3DOpacity, show3DWireframe]);
+
+  // Handle 3D overlay setting changes
+  useEffect(() => {
+    if (threeOverlayRef.current) {
+      threeOverlayRef.current.setWireframeMode(show3DWireframe);
+    }
+  }, [show3DWireframe]);
+
+  useEffect(() => {
+    if (threeOverlayRef.current) {
+      threeOverlayRef.current.setOpacity(nail3DOpacity);
+    }
+  }, [nail3DOpacity]);
+
+  useEffect(() => {
+    if (threeOverlayRef.current) {
+      threeOverlayRef.current.setNailThickness(nail3DThickness);
+    }
+  }, [nail3DThickness]);
+
   return (
     <div className="w-full max-w-4xl">
       <div className="bg-white rounded-lg shadow-lg p-6">
@@ -932,6 +1025,15 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                 className="w-full h-full object-cover"
                 style={{
                   backgroundColor: "#1f2937", // gray-800 fallback
+                }}
+              />
+              {/* 3D Overlay Container */}
+              <div
+                ref={threeContainerRef}
+                className="absolute inset-0 pointer-events-none"
+                style={{
+                  display: show3DOverlay ? "block" : "none",
+                  zIndex: 10,
                 }}
               />
               {!isWebcamActive && (
@@ -1119,6 +1221,98 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                     >
                       Close
                     </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 3D Overlay Controls */}
+          {detectionMode === "both" && nailFingerMatches.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              {/* 3D Overlay Toggle */}
+              <button
+                onClick={() => setShow3DOverlay(!show3DOverlay)}
+                disabled={!isWebcamActive}
+                className={`px-4 py-2 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                  show3DOverlay
+                    ? "bg-cyan-500 hover:bg-cyan-600 text-white"
+                    : "bg-gray-500 hover:bg-gray-600 text-white"
+                }`}
+              >
+                {show3DOverlay ? "🧊 3D Overlay ON" : "🧊 3D Overlay OFF"}
+              </button>
+
+              {/* Wireframe Toggle */}
+              {show3DOverlay && (
+                <button
+                  onClick={() => {
+                    setShow3DWireframe(!show3DWireframe);
+                    if (threeOverlayRef.current) {
+                      threeOverlayRef.current.setWireframeMode(
+                        !show3DWireframe
+                      );
+                    }
+                  }}
+                  className={`px-3 py-2 rounded-lg font-medium transition-colors ${
+                    show3DWireframe
+                      ? "bg-white border-2 border-cyan-500 text-cyan-700"
+                      : "bg-cyan-100 text-cyan-700 hover:bg-cyan-200"
+                  }`}
+                >
+                  {show3DWireframe ? "📐 Wireframe" : "🎯 Solid"}
+                </button>
+              )}
+
+              {/* 3D Controls Panel */}
+              {show3DOverlay && (
+                <div className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2">
+                  {/* Opacity Slider */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-600">Opacity:</span>
+                    <input
+                      type="range"
+                      min="0.2"
+                      max="1"
+                      step="0.1"
+                      value={nail3DOpacity}
+                      onChange={(e) => {
+                        const newOpacity = parseFloat(e.target.value);
+                        setNail3DOpacity(newOpacity);
+                        if (threeOverlayRef.current) {
+                          threeOverlayRef.current.setOpacity(newOpacity);
+                        }
+                      }}
+                      className="w-16"
+                    />
+                    <span className="text-xs text-gray-600 min-w-[30px]">
+                      {Math.round(nail3DOpacity * 100)}%
+                    </span>
+                  </div>
+
+                  {/* Thickness Slider */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-600">Thickness:</span>
+                    <input
+                      type="range"
+                      min="2"
+                      max="20"
+                      step="2"
+                      value={nail3DThickness}
+                      onChange={(e) => {
+                        const newThickness = parseInt(e.target.value);
+                        setNail3DThickness(newThickness);
+                        if (threeOverlayRef.current) {
+                          threeOverlayRef.current.setNailThickness(
+                            newThickness
+                          );
+                        }
+                      }}
+                      className="w-16"
+                    />
+                    <span className="text-xs text-gray-600 min-w-[20px]">
+                      {nail3DThickness}px
+                    </span>
                   </div>
                 </div>
               )}
