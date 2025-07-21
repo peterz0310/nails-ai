@@ -128,16 +128,16 @@ export class ThreeNailOverlay {
 
     // Scale dimensions. Use a scaling factor to make nails more visible.
     const nailScaleFactor = 1.4;
-    const nailLength = match.nailWidth * scaleX * nailScaleFactor; // Along finger
-    const nailWidth = match.nailHeight * scaleY * nailScaleFactor; // Across finger
+    const nailLength = match.nailWidth * scaleY * nailScaleFactor; // Along finger (use scaleY for consistency)
+    const nailWidth = match.nailHeight * scaleX * nailScaleFactor; // Across finger (use scaleX for consistency)
     const nailThickness = this.config.nailThickness;
 
     let mesh = this.nailMeshes.get(key);
 
     if (!mesh) {
       const geometry = this.createNailGeometry(
-        nailLength,
         nailWidth,
+        nailLength,
         nailThickness,
         this.config.nailCurvature
       );
@@ -148,8 +148,8 @@ export class ThreeNailOverlay {
       // Update geometry if parameters changed
       mesh.geometry.dispose();
       mesh.geometry = this.createNailGeometry(
-        nailLength,
         nailWidth,
+        nailLength,
         nailThickness,
         this.config.nailCurvature
       );
@@ -182,17 +182,28 @@ export class ThreeNailOverlay {
   private applyNailRotation(mesh: THREE.Mesh, match: NailFingerMatch): void {
     const { xAxis, yAxis, zAxis } = match.orientation;
 
-    // Convert from MediaPipe coordinates (Y-down, Z-towards-viewer) to
-    // Three.js coordinates (Y-up, Z-towards-viewer is correct)
-    const threeX = new THREE.Vector3(xAxis[0], -xAxis[1], xAxis[2]);
-    const threeY = new THREE.Vector3(yAxis[0], -yAxis[1], yAxis[2]);
-    const threeZ = new THREE.Vector3(zAxis[0], -zAxis[1], zAxis[2]);
+    // The basis vectors from nailMatching are already normalized and orthogonal.
+    // The Z-axis points along the finger.
+    // The Y-axis points out from the nail surface (the normal).
+    // The X-axis points across the nail.
+
+    // We need to map our nail geometry (created on the XY plane) to this basis.
+    // Our nail geometry has width along X and length along Y.
+    // So, we map: Geometry X -> World X-axis, Geometry Y -> World Z-axis, Geometry Z -> World Y-axis
+
+    // Three.js uses a right-handed coordinate system (Y-up). MediaPipe uses a different
+    // convention (Y-down). The `nailMatching` utility has already computed a clean,
+    // right-handed basis for us relative to the world. We just need to apply it.
+
+    const threeZ = new THREE.Vector3(zAxis[0], -zAxis[1], zAxis[2]).normalize(); // Along the finger
+    const threeX = new THREE.Vector3(xAxis[0], -xAxis[1], xAxis[2]).normalize(); // Across the nail
+    const threeY = new THREE.Vector3(yAxis[0], -yAxis[1], yAxis[2]).normalize(); // Out of the nail
 
     // Create a rotation matrix from the three basis vectors
     const rotationMatrix = new THREE.Matrix4().makeBasis(
-      threeX,
-      threeY,
-      threeZ
+      threeX, // Corresponds to the nail's width direction
+      threeZ, // Corresponds to the nail's length direction
+      threeY // Corresponds to the nail's normal (thickness)
     );
 
     // Set the mesh's rotation from this matrix using a quaternion
@@ -209,65 +220,34 @@ export class ThreeNailOverlay {
     depth: number,
     curvature: number
   ): THREE.BufferGeometry {
-    const shape = new THREE.Shape();
-    const halfWidth = width / 2;
-    const halfHeight = height / 2;
-    const radius = height * 0.4; // Rounded tip
+    // A curved plane is more efficient and looks better than an extruded shape.
+    const geom = new THREE.PlaneGeometry(width, height, 10, 10);
+    const positions = geom.attributes.position;
 
-    shape.moveTo(-halfWidth, -halfHeight + radius);
-    shape.lineTo(-halfWidth, halfHeight);
-    shape.lineTo(halfWidth, halfHeight);
-    shape.lineTo(halfWidth, -halfHeight + radius);
-    shape.absarc(
-      halfWidth - radius,
-      -halfHeight + radius,
-      radius,
-      0,
-      Math.PI * 0.5,
-      false
-    );
-    shape.lineTo(-halfWidth + radius, -halfHeight);
-    shape.absarc(
-      -halfWidth + radius,
-      -halfHeight + radius,
-      radius,
-      Math.PI,
-      Math.PI * 1.5,
-      false
-    );
+    // Apply curvature along the nail's width (local X-axis)
+    const curveAmount = width * curvature * 0.5;
 
-    const extrudeSettings = {
-      steps: 1,
-      depth: depth,
-      bevelEnabled: true,
-      bevelThickness: 1,
-      bevelSize: 1,
-      bevelSegments: 2,
-    };
+    if (curvature > 0.01) {
+      for (let i = 0; i < positions.count; i++) {
+        const x = positions.getX(i);
+        const y = positions.getY(i);
 
-    // Use a simple Box for performance, or ExtrudeGeometry for shape.
-    // Let's create a curved plane which is more efficient.
-    const planeGeom = new THREE.PlaneGeometry(width, height, 10, 2);
-    const positions = planeGeom.attributes.position;
+        // Apply quadratic curve for a smooth arc
+        const zOffset = -curveAmount * (1.0 - Math.pow(x / (width / 2), 2));
+        positions.setZ(i, zOffset);
 
-    // Apply curvature along the nail's width (X-axis)
-    const curveRadius = width / 2 / Math.sin(Math.PI * curvature * 0.4);
-    for (let i = 0; i < positions.count; i++) {
-      const x = positions.getX(i);
-      if (curvature > 0.05) {
-        const zOffset =
-          curveRadius - Math.sqrt(curveRadius * curveRadius - x * x);
-        positions.setZ(i, -zOffset);
+        // Taper the tip slightly for a more natural shape
+        if (y > 0) {
+          const taper = 1.0 - (y / height) * 0.4; // Taper top 40%
+          positions.setX(i, x * taper);
+        }
       }
     }
-    planeGeom.computeVertexNormals();
+    geom.computeVertexNormals();
 
-    // The geometry is created flat (on XY plane). The rotation will orient it correctly.
-    // We need to rotate it so it aligns with our basis vectors. X->width, Y->height
-    planeGeom.rotateX(Math.PI / 2); // Make it lie on XZ plane initially
-    planeGeom.scale(-1, 1, 1); // Flip to align with handedness of basis
-
-    return planeGeom;
+    // The geometry is created flat on the XY plane.
+    // The rotation logic will orient it correctly in 3D space.
+    return geom;
   }
 
   public resize(width: number, height: number): void {
@@ -300,9 +280,14 @@ export class ThreeNailOverlay {
       }
     });
     this.nailMeshes.clear();
-    this.renderer.dispose();
-    if (this.containerElement.contains(this.renderer.domElement)) {
-      this.containerElement.removeChild(this.renderer.domElement);
+    if (this.renderer) {
+      this.renderer.dispose();
+      if (
+        this.containerElement &&
+        this.containerElement.contains(this.renderer.domElement)
+      ) {
+        this.containerElement.removeChild(this.renderer.domElement);
+      }
     }
     console.log("3D nail overlay disposed.");
   }

@@ -78,12 +78,12 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
 
   // 3D Overlay state and controls
   const [show3DOverlay, setShow3DOverlay] = useState(true);
-  const [show3DWireframe, setShow3DWireframe] = useState(false);
+  const [show3DWireframe, setShow3DWireframe] = useState(true); // Default to true to see the fix
   const [nail3DOpacity, setNail3DOpacity] = useState(0.8);
   const [nail3DThickness, setNail3DThickness] = useState(8);
   const [nail3DMetallic, setNail3DMetallic] = useState(0.7);
   const [nail3DRoughness, setNail3DRoughness] = useState(0.3);
-  const [nail3DCurvature, setNail3DCurvature] = useState(0.2);
+  const [nail3DCurvature, setNail3DCurvature] = useState(0.5); // Default to a visible curve
   const [enable3DRotation, setEnable3DRotation] = useState(false);
   const [enable3DReflections, setEnable3DReflections] = useState(true);
   const threeOverlayRef = useRef<ThreeNailOverlay | null>(null);
@@ -137,7 +137,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
         };
       });
     },
-    [smoothingWindowSize]
+    [] // Removed smoothingWindowSize from dependencies as it's constant
   );
 
   // Detection mode change handler with cleanup
@@ -341,7 +341,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       );
       onModelLoaded(false);
     }
-  }, [onModelLoaded]);
+  }, [onModelLoaded, smoothNailOrientations]);
 
   // Initialize webcam
   const startWebcam = useCallback(async () => {
@@ -550,7 +550,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       setIsProcessing(false);
       pendingInferenceRef.current = false;
     }
-  }, [isProcessing, detectionMode]);
+  }, [isProcessing, detectionMode, smoothNailOrientations]);
 
   // Optimized drawing with better performance and frame synchronization
   const drawDetections = useCallback(() => {
@@ -772,14 +772,25 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
         threeOverlayRef.current.resize(canvas.width, canvas.height);
       }
 
-      // Update 3D nail overlays with current matches (even if 0 matches for test cube)
+      // Update 3D nail overlays with current matches
       threeOverlayRef.current.updateNailOverlays(
         currentMatches,
         scaleX,
         scaleY
       );
     }
-  }, [enableColorFilter, selectedColor, detectionMode, nailFingerMatches]);
+  }, [
+    enableColorFilter,
+    selectedColor,
+    detectionMode,
+    nailFingerMatches,
+    show3DOverlay,
+    showConfidenceScores,
+    showHandLandmarks,
+    showNailFingerMatches,
+    showNailLabels,
+    showNailOutlines,
+  ]);
 
   // Optimized main processing loop with better timing control
   const processFrame = useCallback(() => {
@@ -906,7 +917,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
 
   useEffect(() => {
     if (isWebcamActive && (modelRef.current || handsModelRef.current)) {
-      processFrame();
+      animationRef.current = requestAnimationFrame(processFrame);
     }
 
     return () => {
@@ -939,10 +950,10 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
         canvasSize: canvas ? [canvas.width, canvas.height] : "N/A",
       });
 
-      if (canvas) {
+      if (canvas && canvas.width > 0 && canvas.height > 0) {
         const config: ThreeNailOverlayConfig = {
-          canvasWidth: canvas.width || 640,
-          canvasHeight: canvas.height || 640,
+          canvasWidth: canvas.width,
+          canvasHeight: canvas.height,
           videoWidth: videoRef.current?.videoWidth || 640,
           videoHeight: videoRef.current?.videoHeight || 640,
           enableLighting: true,
@@ -971,14 +982,17 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       threeOverlayRef.current = null;
       console.log("3D nail overlay disposed");
     }
-
-    return () => {
-      if (threeOverlayRef.current) {
-        threeOverlayRef.current.dispose();
-        threeOverlayRef.current = null;
-      }
-    };
-  }, [show3DOverlay, nail3DThickness, nail3DOpacity, show3DWireframe]);
+  }, [
+    show3DOverlay,
+    nail3DThickness,
+    nail3DOpacity,
+    show3DWireframe,
+    nail3DMetallic,
+    nail3DRoughness,
+    enable3DReflections,
+    enable3DRotation,
+    nail3DCurvature,
+  ]);
 
   // Handle 3D overlay setting changes
   useEffect(() => {
@@ -1051,7 +1065,8 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                       videoRef.current &&
                       videoRef.current.videoWidth > 0
                     ) {
-                      processFrame();
+                      animationRef.current =
+                        requestAnimationFrame(processFrame);
                     }
                   }, 100);
                 }}
