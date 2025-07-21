@@ -144,7 +144,7 @@ function calculateFingerDirection(
 }
 
 /**
- * Match nails to fingertips using proximity and geometric constraints
+ * Match nails to fingertips using improved proximity and geometric constraints
  */
 export function matchNailsToFingertips(
   nailDetections: YoloDetection[],
@@ -158,8 +158,23 @@ export function matchNailsToFingertips(
     return matches;
   }
 
+  // Improved distance threshold based on frame size
+  const maxReasonableDistance = Math.min(frameWidth, frameHeight) * 0.12; // Reduced to 12% for better precision
+  const minNailSize = frameWidth * frameHeight * 0.0001; // Minimum nail size to consider
+  const maxNailSize = frameWidth * frameHeight * 0.02; // Maximum reasonable nail size
+
+  console.log(
+    `Matching parameters: maxDistance=${maxReasonableDistance.toFixed(
+      1
+    )}, frameSize=${frameWidth}x${frameHeight}`
+  );
+
   // For each hand
   handDetections.forEach((hand, handIndex) => {
+    console.log(
+      `Processing ${hand.handedness} hand with ${hand.landmarks.length} landmarks`
+    );
+
     // For each fingertip
     FINGER_TIPS.forEach((tipIndex, fingerIndex) => {
       if (tipIndex >= hand.landmarks.length) return;
@@ -170,36 +185,66 @@ export function matchNailsToFingertips(
         fingertip.y * frameHeight,
       ];
 
-      // Find the closest nail detection to this fingertip
+      // Find the best nail detection for this fingertip
       let bestMatch: {
         detection: YoloDetection;
         distance: number;
         confidence: number;
       } | null = null;
 
-      nailDetections.forEach((detection) => {
+      nailDetections.forEach((detection, detectionIndex) => {
         const nailCentroid = calculateNailCentroid(detection);
         const dist = distance(fingertipPos, nailCentroid);
 
-        // Calculate match confidence based on:
-        // 1. Distance (closer is better)
-        // 2. Detection confidence
-        // 3. Size reasonableness
-        const maxReasonableDistance = Math.min(frameWidth, frameHeight) * 0.15; // 15% of frame
+        // Improved size filtering
+        const nailArea = detection.bbox[2] * detection.bbox[3];
+        if (nailArea < minNailSize || nailArea > maxNailSize) {
+          console.log(
+            `Skipping nail ${detectionIndex}: size ${nailArea.toFixed(
+              0
+            )} outside range [${minNailSize.toFixed(0)}, ${maxNailSize.toFixed(
+              0
+            )}]`
+          );
+          return;
+        }
+
+        // Enhanced confidence calculation with multiple factors
         const distanceScore = Math.max(0, 1 - dist / maxReasonableDistance);
-        const sizeScore = Math.min(
-          1,
-          Math.max(
-            0.1,
-            (detection.bbox[2] * detection.bbox[3]) /
-              (frameWidth * frameHeight * 0.01)
-          )
-        ); // Reasonable nail size
 
-        const confidence = distanceScore * detection.score * sizeScore;
+        // Size score: prefer nails that are reasonable size for the frame
+        const idealNailArea = frameWidth * frameHeight * 0.002; // 0.2% of frame
+        const sizeRatio = Math.min(
+          nailArea / idealNailArea,
+          idealNailArea / nailArea
+        );
+        const sizeScore = Math.max(0.1, Math.min(1, sizeRatio));
 
-        // Only consider if within reasonable distance and good confidence
-        if (dist < maxReasonableDistance && confidence > 0.3) {
+        // Detection confidence from YOLO
+        const detectionScore = Math.min(1, detection.score * 1.2); // Boost slightly
+
+        // Position score: nails should be near the fingertip
+        const positionScore = dist < maxReasonableDistance ? 1 : 0;
+
+        // Combined confidence with weighted factors
+        const confidence =
+          distanceScore * 0.4 +
+          sizeScore * 0.25 +
+          detectionScore * 0.25 +
+          positionScore * 0.1;
+
+        console.log(
+          `Nail ${detectionIndex} -> ${hand.handedness} ${
+            FINGER_NAMES[fingerIndex]
+          }: dist=${dist.toFixed(1)}, conf=${confidence.toFixed(
+            2
+          )} (d=${distanceScore.toFixed(2)}, s=${sizeScore.toFixed(
+            2
+          )}, det=${detectionScore.toFixed(2)})`
+        );
+
+        // Higher confidence threshold for better matching
+        if (dist < maxReasonableDistance && confidence > 0.4) {
           if (!bestMatch || confidence > bestMatch.confidence) {
             bestMatch = {
               detection,
@@ -211,7 +256,7 @@ export function matchNailsToFingertips(
       });
 
       // If we found a good match, create the nail-finger match
-      if (bestMatch !== null) {
+      if (bestMatch) {
         const fingerDirection = calculateFingerDirection(hand, fingerIndex);
         const nailCentroid = calculateNailCentroid(bestMatch.detection);
         const nailDimensions = calculateNailDimensions(bestMatch.detection);
@@ -233,13 +278,13 @@ export function matchNailsToFingertips(
         matches.push(match);
 
         console.log(
-          `Matched nail to ${hand.handedness} ${FINGER_NAMES[fingerIndex]} finger:`,
+          `✓ Matched nail to ${hand.handedness} ${FINGER_NAMES[fingerIndex]} finger:`,
           {
-            confidence: bestMatch.confidence.toFixed(2),
+            confidence: bestMatch.confidence.toFixed(3),
             distance: bestMatch.distance.toFixed(1),
             nailSize: `${nailDimensions.width.toFixed(
               1
-            )}x${nailDimensions.height.toFixed(1)}`,
+            )}×${nailDimensions.height.toFixed(1)}`,
             angle: `${((nailDimensions.angle * 180) / Math.PI).toFixed(1)}°`,
           }
         );
@@ -247,22 +292,36 @@ export function matchNailsToFingertips(
     });
   });
 
-  // Remove duplicate nail detections (same nail matched to multiple fingers)
+  // Improved duplicate removal: prefer higher confidence and closer matches
   const uniqueMatches: NailFingerMatch[] = [];
   const usedNails = new Set<YoloDetection>();
+  const usedFingers = new Set<string>(); // Track hand+finger combinations
 
-  // Sort by confidence and take the best match for each nail
+  // Sort by confidence first, then by distance
   matches
-    .sort((a, b) => b.matchConfidence - a.matchConfidence)
+    .sort((a, b) => {
+      const confDiff = b.matchConfidence - a.matchConfidence;
+      if (Math.abs(confDiff) > 0.05) return confDiff; // Significant confidence difference
+      return (
+        a.fingertipPosition[0] +
+        a.fingertipPosition[1] -
+        (b.fingertipPosition[0] + b.fingertipPosition[1])
+      ); // Tie-break by position
+    })
     .forEach((match) => {
-      if (!usedNails.has(match.nailDetection)) {
+      const fingerKey = `${match.handIndex}-${match.fingertipIndex}`;
+
+      if (!usedNails.has(match.nailDetection) && !usedFingers.has(fingerKey)) {
         uniqueMatches.push(match);
         usedNails.add(match.nailDetection);
+        usedFingers.add(fingerKey);
+      } else {
+        console.log(`Skipping duplicate: nail or finger already matched`);
       }
     });
 
   console.log(
-    `Successfully matched ${uniqueMatches.length} nails to fingertips`
+    `Successfully matched ${uniqueMatches.length} nails to fingertips (from ${matches.length} candidates)`
   );
 
   return uniqueMatches;

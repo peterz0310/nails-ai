@@ -69,9 +69,9 @@ export const initializeMediaPipeHands = async (): Promise<MediaPipeHands> => {
 
     hands.setOptions({
       maxNumHands: 2,
-      modelComplexity: 0, // Reduced from 1 to 0 for better performance
-      minDetectionConfidence: 0.7, // Increased to reduce false positives and processing
-      minTrackingConfidence: 0.7, // Increased for better stability and less processing
+      modelComplexity: 0, // Keep at 0 for better performance
+      minDetectionConfidence: 0.6, // Reduced from 0.7 for more detections
+      minTrackingConfidence: 0.6, // Reduced from 0.7 for better tracking
     });
 
     handsModel = hands as MediaPipeHands;
