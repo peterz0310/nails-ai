@@ -10,32 +10,55 @@
 
 import { YoloDetection } from "./yolo";
 import { HandDetection } from "./mediapipe";
+import * as THREE from "three"; // Using THREE's Vector3 for convenience
 
-// FIXED: The interface now includes a full 3D orientation basis.
-// This is the key to solving rotation and tilting issues.
+// The interface remains the same, but the 'orientation' data will be more stable.
 export interface NailFingerMatch {
   nailDetection: YoloDetection;
-  fingertipIndex: number; // MediaPipe finger index (4, 8, 12, 16, 20)
+  fingertipIndex: number;
   fingertipPosition: [number, number];
   nailCentroid: [number, number];
-  nailWidth: number; // Length along finger direction (longitudinal)
-  nailHeight: number; // Width perpendicular to finger direction (transverse)
-  nailAngle: number; // 2D rotation in radians for canvas drawing and smoothing
+  nailWidth: number;
+  nailHeight: number;
+  nailAngle: number;
   matchConfidence: number;
   handIndex: number;
   handedness: "Left" | "Right";
-  // NEW: Full 3D orientation basis for robust 3D rendering
   orientation: {
-    xAxis: [number, number, number]; // Transverse vector (nail's "right")
-    yAxis: [number, number, number]; // Normal vector (out from nail surface, nail's "up")
-    zAxis: [number, number, number]; // Longitudinal vector (along finger, nail's "forward")
+    xAxis: [number, number, number];
+    yAxis: [number, number, number];
+    zAxis: [number, number, number];
   };
 }
 
-// MediaPipe finger landmark indices
-const FINGER_TIPS = [4, 8, 12, 16, 20]; // Thumb, Index, Middle, Ring, Pinky
-const FINGER_PIPS = [3, 6, 10, 14, 18]; // Proximal Interphalangeal joints for more stable direction
+// MediaPipe finger landmark indices, defined for clarity
+const FINGER_LANDMARKS = {
+  THUMB: { TIP: 4, DIP: 3, PIP: 2 },
+  INDEX: { TIP: 8, DIP: 7, PIP: 6 },
+  MIDDLE: { TIP: 12, DIP: 11, PIP: 10 },
+  RING: { TIP: 16, DIP: 15, PIP: 14 },
+  PINKY: { TIP: 20, DIP: 19, PIP: 18 },
+};
+
+const FINGER_TIPS = [4, 8, 12, 16, 20];
 const FINGER_NAMES = ["Thumb", "Index", "Middle", "Ring", "Pinky"];
+
+function getFingerLandmarkIndices(tipIndex: number) {
+  switch (tipIndex) {
+    case 4:
+      return FINGER_LANDMARKS.THUMB;
+    case 8:
+      return FINGER_LANDMARKS.INDEX;
+    case 12:
+      return FINGER_LANDMARKS.MIDDLE;
+    case 16:
+      return FINGER_LANDMARKS.RING;
+    case 20:
+      return FINGER_LANDMARKS.PINKY;
+    default:
+      return null;
+  }
+}
 
 /**
  * Calculate the centroid of a nail detection
@@ -61,62 +84,97 @@ function calculateNailCentroid(detection: YoloDetection): [number, number] {
 }
 
 /**
- * Calculate nail dimensions and 2D orientation based on a 2D projection of the finger direction.
+ * FIXED: This is the new core logic for calculating a stable 3D orientation basis.
+ * It uses the hand's own geometry to avoid issues with world axes.
  */
+function calculateOrientationBasis(
+  hand: HandDetection,
+  tipIndex: number
+): NailFingerMatch["orientation"] | null {
+  const lm = hand.landmarks;
+  const indices = getFingerLandmarkIndices(tipIndex);
+  if (!indices) return null;
+
+  const { TIP, DIP, PIP } = indices;
+  if ([TIP, DIP, PIP].some((i) => i >= lm.length)) return null;
+
+  // Create vectors from the landmarks
+  const p_tip = new THREE.Vector3(lm[TIP].x, lm[TIP].y, lm[TIP].z);
+  const p_dip = new THREE.Vector3(lm[DIP].x, lm[DIP].y, lm[DIP].z);
+  const p_pip = new THREE.Vector3(lm[PIP].x, lm[PIP].y, lm[PIP].z);
+
+  // Define two vectors on the plane of the back of the finger
+  const v1 = p_dip.clone().sub(p_pip); // Vector from PIP to DIP
+  const v2 = p_tip.clone().sub(p_dip); // Vector from DIP to TIP
+
+  // The cross product gives us the normal vector to the finger's surface (Y-axis)
+  // This is the key to fixing the "upside down" problem.
+  let yAxis = new THREE.Vector3().crossVectors(v1, v2).normalize();
+
+  // The direction of the cross product depends on the "winding" of the points.
+  // For MediaPipe's landmark ordering, a Left hand will have an inverted normal.
+  // We correct this using the provided handedness info.
+  if (hand.handedness === "Left") {
+    yAxis.negate();
+  }
+
+  // The direction of the finger (Z-axis) can be taken from PIP to TIP
+  let zAxis = p_tip.clone().sub(p_pip).normalize();
+
+  // We create the third axis (X-axis) using another cross product to ensure orthogonality.
+  let xAxis = new THREE.Vector3().crossVectors(yAxis, zAxis).normalize();
+
+  // Re-calculate the Z-axis to make the basis perfectly orthogonal (Gram-Schmidt process)
+  zAxis = new THREE.Vector3().crossVectors(xAxis, yAxis).normalize();
+
+  return {
+    xAxis: xAxis.toArray() as [number, number, number],
+    yAxis: yAxis.toArray() as [number, number, number],
+    zAxis: zAxis.toArray() as [number, number, number],
+  };
+}
+
 function calculateNailDimensions(
   detection: YoloDetection,
-  fingerDirection3D: [number, number, number]
+  zAxis: [number, number, number]
 ): { width: number; height: number; angle: number } {
-  // Project the 3D finger direction onto the 2D screen for dimension calculation
-  const fingerDirection2D: [number, number] = [
-    fingerDirection3D[0],
-    fingerDirection3D[1],
-  ];
-  const angle = Math.atan2(fingerDirection2D[1], fingerDirection2D[0]);
-
-  // The perpendicular direction in 2D
-  const perpDirection2D: [number, number] = [
-    -fingerDirection2D[1],
-    fingerDirection2D[0],
-  ];
+  const fingerDirection2D = new THREE.Vector2(zAxis[0], zAxis[1]).normalize();
+  const angle = Math.atan2(fingerDirection2D.y, fingerDirection2D.x);
+  const perpDirection2D = new THREE.Vector2(
+    -fingerDirection2D.y,
+    fingerDirection2D.x
+  );
 
   if (detection.maskPolygon && detection.maskPolygon.length > 4) {
     const polygon = detection.maskPolygon;
-    const centroidX =
-      polygon.reduce((sum, p) => sum + p[0], 0) / polygon.length;
-    const centroidY =
-      polygon.reduce((sum, p) => sum + p[1], 0) / polygon.length;
+    const centroid = calculateNailCentroid(detection);
+    const centroidV2 = new THREE.Vector2(centroid[0], centroid[1]);
 
     let minLong = Infinity,
       maxLong = -Infinity;
     let minTrans = Infinity,
       maxTrans = -Infinity;
 
-    polygon.forEach((point) => {
-      const dx = point[0] - centroidX;
-      const dy = point[1] - centroidY;
+    polygon.forEach((p) => {
+      const pointV2 = new THREE.Vector2(p[0], p[1]);
+      const d = pointV2.sub(centroidV2);
 
-      const longitudinal =
-        dx * fingerDirection2D[0] + dy * fingerDirection2D[1];
-      minLong = Math.min(minLong, longitudinal);
-      maxLong = Math.max(maxLong, longitudinal);
-
-      const transverse = dx * perpDirection2D[0] + dy * perpDirection2D[1];
-      minTrans = Math.min(minTrans, transverse);
-      maxTrans = Math.max(maxTrans, transverse);
+      minLong = Math.min(minLong, d.dot(fingerDirection2D));
+      maxLong = Math.max(maxLong, d.dot(fingerDirection2D));
+      minTrans = Math.min(minTrans, d.dot(perpDirection2D));
+      maxTrans = Math.max(maxTrans, d.dot(perpDirection2D));
     });
 
     return {
-      width: maxLong - minLong, // Length along the finger
-      height: maxTrans - minTrans, // Width across the finger
+      height: maxLong - minLong, // Length along the finger
+      width: maxTrans - minTrans, // Width across the finger
       angle,
     };
   } else {
-    // Fallback to bounding box dimensions
     const [, , bboxWidth, bboxHeight] = detection.bbox;
     return {
-      width: Math.max(bboxWidth, bboxHeight),
-      height: Math.min(bboxWidth, bboxHeight),
+      height: Math.max(bboxWidth, bboxHeight),
+      width: Math.min(bboxWidth, bboxHeight),
       angle,
     };
   }
@@ -131,45 +189,6 @@ function distanceBetweenPoints(
   return Math.sqrt(dx * dx + dy * dy);
 }
 
-/**
- * FIXED: Calculate a stable 3D finger direction vector.
- * Removed distorting clamps and simplified the logic for a more reliable vector.
- */
-function calculateFingerDirection(
-  hand: HandDetection,
-  fingerIndex: number
-): [number, number, number] {
-  const tipIndex = FINGER_TIPS[fingerIndex];
-  const pipIndex = FINGER_PIPS[fingerIndex];
-
-  if (tipIndex >= hand.landmarks.length || pipIndex >= hand.landmarks.length) {
-    return [0, 1, 0]; // Default upward
-  }
-
-  const tip = hand.landmarks[tipIndex];
-  const pip = hand.landmarks[pipIndex];
-
-  // Vector from the PIP joint to the tip provides a stable finger direction
-  let dx = tip.x - pip.x;
-  let dy = tip.y - pip.y;
-  let dz = tip.z - pip.z;
-
-  // Exaggerate depth slightly for a better 3D effect. This is a common heuristic.
-  // The value is reduced from 1.5 to 1.2 for more subtlety.
-  dz *= 1.2;
-
-  const length = Math.sqrt(dx * dx + dy * dy + dz * dz);
-  if (length === 0) return [0, 1, 0]; // Avoid division by zero
-
-  // Return the normalized 3D direction vector
-  return [dx / length, dy / length, dz / length];
-}
-
-/**
- * FIXED: This is the core logic change.
- * It now computes a full 3D orientation basis (X, Y, Z axes) for each nail,
- * providing all the information needed for correct 3D rotation.
- */
 export function matchNailsToFingertips(
   nailDetections: YoloDetection[],
   handDetections: HandDetection[],
@@ -181,25 +200,10 @@ export function matchNailsToFingertips(
   }
 
   const matches: NailFingerMatch[] = [];
-  const maxDistance = Math.min(frameWidth, frameHeight) * 0.15; // 15% of min dimension
-
-  // Vector math helpers
-  const cross = (a: number[], b: number[]): number[] => [
-    a[1] * b[2] - a[2] * b[1],
-    a[2] * b[0] - a[0] * b[2],
-    a[0] * b[1] - a[1] * b[0],
-  ];
-  const normalize = (v: number[]): number[] => {
-    const len = Math.sqrt(v.reduce((sum, val) => sum + val * val, 0));
-    return len > 0
-      ? (v.map((c) => c / len) as [number, number, number])
-      : [0, 0, 0];
-  };
-  const dot = (a: number[], b: number[]): number =>
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const maxDistance = Math.min(frameWidth, frameHeight) * 0.15;
 
   handDetections.forEach((hand, handIndex) => {
-    FINGER_TIPS.forEach((tipIndex, fingerIndex) => {
+    FINGER_TIPS.forEach((tipIndex) => {
       if (tipIndex >= hand.landmarks.length) return;
 
       const fingertip = hand.landmarks[tipIndex];
@@ -227,38 +231,17 @@ export function matchNailsToFingertips(
       });
 
       if (bestMatch && bestMatch.confidence > 0.4) {
-        // --- START OF NEW ORIENTATION LOGIC ---
-        const zAxis = calculateFingerDirection(hand, fingerIndex) as [
-          number,
-          number,
-          number
-        ];
-
-        // Define world up vector. MediaPipe's Y-axis points down.
-        const worldUp: [number, number, number] = [0, -1, 0];
-
-        // Calculate the nail's "right" vector (X-axis)
-        let xAxis = normalize(cross(worldUp, zAxis));
-
-        // If finger points straight up/down, the cross product is zero. Provide a fallback.
-        if (dot(xAxis, xAxis) < 0.1) {
-          const handDirection =
-            hand.handedness === "Right" ? [1, 0, 0] : [-1, 0, 0];
-          xAxis = normalize(cross(zAxis, handDirection));
-        }
-
-        // Calculate the nail's "up" vector (Y-axis), pointing out of the nail surface.
-        // The order zAxis, xAxis ensures a right-handed coordinate system.
-        const yAxis = normalize(cross(zAxis, xAxis));
-        // --- END OF NEW ORIENTATION LOGIC ---
+        // Use the new, robust orientation calculation
+        const orientation = calculateOrientationBasis(hand, tipIndex);
+        if (!orientation) return;
 
         const nailCentroid = calculateNailCentroid(bestMatch.detection);
         const nailDimensions = calculateNailDimensions(
           bestMatch.detection,
-          zAxis
+          orientation.zAxis
         );
 
-        const match: NailFingerMatch = {
+        matches.push({
           nailDetection: bestMatch.detection,
           fingertipIndex: tipIndex,
           fingertipPosition: fingertipPos,
@@ -269,14 +252,13 @@ export function matchNailsToFingertips(
           matchConfidence: bestMatch.confidence,
           handIndex: handIndex,
           handedness: hand.handedness as "Left" | "Right",
-          orientation: { xAxis, yAxis, zAxis }, // Store the full basis
-        };
-        matches.push(match);
+          orientation: orientation,
+        });
       }
     });
   });
 
-  // Deduplication: Ensure each nail and finger is used only once per frame
+  // Deduplication to ensure each nail and finger is used only once
   const uniqueMatches: NailFingerMatch[] = [];
   const usedNails = new Set<YoloDetection>();
   const usedFingers = new Set<string>();
@@ -292,19 +274,9 @@ export function matchNailsToFingertips(
       }
     });
 
-  if (Math.random() < 0.05) {
-    // Reduce logging
-    console.log(
-      `Matching found ${uniqueMatches.length} unique matches from ${matches.length} candidates.`
-    );
-  }
-
   return uniqueMatches;
 }
 
-/**
- * Draw nail-finger matches with improved visualization
- */
 export function drawNailFingerMatches(
   ctx: CanvasRenderingContext2D,
   matches: NailFingerMatch[],
@@ -321,7 +293,6 @@ export function drawNailFingerMatches(
       match.fingertipPosition[1] * scaleY,
     ];
 
-    // Draw connection line
     ctx.strokeStyle = "#00ff88";
     ctx.lineWidth = 2;
     ctx.setLineDash([8, 4]);
@@ -329,17 +300,13 @@ export function drawNailFingerMatches(
     ctx.moveTo(scaledCentroid[0], scaledCentroid[1]);
     ctx.lineTo(scaledFingertip[0], scaledFingertip[1]);
     ctx.stroke();
-
-    // Reset line dash for other drawings
     ctx.setLineDash([]);
 
-    // Draw nail centroid
     ctx.fillStyle = "#00ff88";
     ctx.beginPath();
     ctx.arc(scaledCentroid[0], scaledCentroid[1], 4, 0, 2 * Math.PI);
     ctx.fill();
 
-    // Draw finger name and confidence
     const fingerName =
       FINGER_NAMES[FINGER_TIPS.indexOf(match.fingertipIndex)] || "Unknown";
     const label = `${match.handedness} ${fingerName} (${(
