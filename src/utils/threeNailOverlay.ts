@@ -2,12 +2,14 @@
  * Three.js 3D Nail Overlay System
  *
  * This module provides 3D nail overlay functionality using Three.js to render
- * rectangular prism "fake nails" on top of detected and matched real nails.
- * The system handles:
- * 1. Creating and managing Three.js scene, camera, and renderer
- * 2. Positioning 3D nail prisms based on nail detection and orientation data
- * 3. Proper lighting and shading for realistic appearance
- * 4. Smooth transitions and updates for real-time tracking
+ * realistic 3D nail prisms on top of detected and matched real nails.
+ *
+ * Features:
+ * - Real-time 3D nail rendering with proper positioning and rotation
+ * - Multiple material types (standard, metallic, wireframe)
+ * - Dynamic lighting with shadows and reflections
+ * - Configurable nail properties (thickness, opacity, curvature)
+ * - Smooth coordinate system mapping from video to 3D space
  */
 
 import * as THREE from "three";
@@ -22,6 +24,11 @@ export interface ThreeNailOverlayConfig {
   nailThickness: number; // Depth of the nail prism (Z-axis)
   nailOpacity: number;
   showWireframe: boolean;
+  metallicIntensity: number; // 0-1, how metallic the nails appear
+  roughness: number; // 0-1, surface roughness (0 = mirror, 1 = rough)
+  enableReflections: boolean;
+  enable3DRotation: boolean; // Enable subtle 3D rotation for visual interest
+  nailCurvature: number; // 0-1, how curved the nail surface is
 }
 
 export class ThreeNailOverlay {
@@ -31,13 +38,15 @@ export class ThreeNailOverlay {
   private nailMeshes: Map<string, THREE.Mesh> = new Map();
   private directionalLight!: THREE.DirectionalLight;
   private ambientLight!: THREE.AmbientLight;
+  private pointLight!: THREE.PointLight;
   private config: ThreeNailOverlayConfig;
   private containerElement: HTMLElement;
   private isInitialized = false;
 
-  // Material for the nail prisms
-  private nailMaterial!: THREE.MeshPhongMaterial;
+  // Materials for the nail prisms
+  private nailMaterial!: THREE.MeshStandardMaterial;
   private wireframeMaterial!: THREE.MeshBasicMaterial;
+  private metallicMaterial!: THREE.MeshPhysicalMaterial;
 
   constructor(containerElement: HTMLElement, config: ThreeNailOverlayConfig) {
     this.containerElement = containerElement;
@@ -47,17 +56,18 @@ export class ThreeNailOverlay {
     this.scene = new THREE.Scene();
     this.scene.background = null; // Transparent background
 
-    // Create orthographic camera for 2D overlay projection
+    // Create perspective camera for proper 3D visualization
     const { canvasWidth, canvasHeight } = config;
     this.camera = new THREE.OrthographicCamera(
       -canvasWidth / 2,
       canvasWidth / 2, // left, right (centered)
       canvasHeight / 2,
       -canvasHeight / 2, // top, bottom (Y-axis flipped to match canvas)
-      -1000,
-      1000 // near, far
+      0.1, // near - closer for better 3D depth
+      2000 // far - increased range
     );
-    this.camera.position.set(0, 0, 100);
+    this.camera.position.set(0, 0, 300); // Move camera further back
+    this.camera.lookAt(0, 0, 0); // Ensure camera looks at center
 
     // Create WebGL renderer
     this.renderer = new THREE.WebGLRenderer({
@@ -76,15 +86,26 @@ export class ThreeNailOverlay {
     this.renderer.domElement.style.width = "100%";
     this.renderer.domElement.style.height = "100%";
     this.renderer.domElement.style.pointerEvents = "none";
-    this.renderer.domElement.style.zIndex = "5";
+    this.renderer.domElement.style.zIndex = "15"; // Higher than container's zIndex: 10
 
     // Create materials
-    this.nailMaterial = new THREE.MeshPhongMaterial({
+    this.nailMaterial = new THREE.MeshStandardMaterial({
       color: 0xff69b4, // Pink color for fake nails
       transparent: true,
       opacity: config.nailOpacity,
-      shininess: 100,
-      specular: 0x444444,
+      metalness: config.metallicIntensity || 0.3,
+      roughness: config.roughness || 0.4,
+    });
+
+    this.metallicMaterial = new THREE.MeshPhysicalMaterial({
+      color: 0xf0c0ff, // Slightly lighter metallic pink
+      transparent: true,
+      opacity: config.nailOpacity,
+      metalness: config.metallicIntensity || 0.8,
+      roughness: config.roughness || 0.2,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.1,
+      reflectivity: config.enableReflections ? 0.9 : 0.3,
     });
 
     this.wireframeMaterial = new THREE.MeshBasicMaterial({
@@ -101,16 +122,16 @@ export class ThreeNailOverlay {
     this.containerElement.appendChild(this.renderer.domElement);
     this.isInitialized = true;
 
-    console.log("Three.js nail overlay initialized");
+    console.log("3D nail overlay initialized successfully");
   }
 
   private setupLighting(): void {
     // Ambient light for general illumination
-    this.ambientLight = new THREE.AmbientLight(0x404040, 0.4);
+    this.ambientLight = new THREE.AmbientLight(0x404040, 0.3);
     this.scene.add(this.ambientLight);
 
-    // Directional light for shadows and highlights
-    this.directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    // Main directional light for primary shadows and highlights
+    this.directionalLight = new THREE.DirectionalLight(0xffffff, 1.0);
     this.directionalLight.position.set(100, 100, 200);
     this.directionalLight.castShadow = true;
 
@@ -125,6 +146,17 @@ export class ThreeNailOverlay {
     this.directionalLight.shadow.camera.bottom = -200;
 
     this.scene.add(this.directionalLight);
+
+    // Add a point light for enhanced metallic reflections
+    this.pointLight = new THREE.PointLight(0xffffff, 0.8, 400);
+    this.pointLight.position.set(-50, 50, 150);
+    this.pointLight.castShadow = true;
+    this.scene.add(this.pointLight);
+
+    // Add rim lighting for better 3D appearance
+    const rimLight = new THREE.DirectionalLight(0x8888ff, 0.4);
+    rimLight.position.set(-100, -50, 100);
+    this.scene.add(rimLight);
   }
 
   /**
@@ -135,7 +167,10 @@ export class ThreeNailOverlay {
     scaleX: number,
     scaleY: number
   ): void {
-    if (!this.isInitialized) return;
+    if (!this.isInitialized) {
+      console.warn("3D overlay not initialized, skipping update");
+      return;
+    }
 
     // Clear existing meshes that are no longer matched
     const currentKeys = new Set(
@@ -154,7 +189,7 @@ export class ThreeNailOverlay {
       this.updateNailMesh(match, scaleX, scaleY);
     });
 
-    // Render the scene
+    // Always render the scene (test cube or nail meshes)
     this.render();
   }
 
@@ -180,25 +215,49 @@ export class ThreeNailOverlay {
     let finalWidth = Math.max(scaledWidth, minSize);
     let finalHeight = Math.max(scaledHeight, minSize * 0.6);
 
-    // Ensure the longer dimension is used as the nail length (along finger direction)
-    // The nail width in the data represents the length along the finger
-    const geometry = new THREE.BoxGeometry(finalWidth, finalHeight, thickness);
+    // Create curved nail geometry for more realistic appearance
+    let geometry: THREE.BufferGeometry;
+
+    if (this.config.nailCurvature > 0) {
+      // Create a slightly curved nail using cylinder geometry
+      const segments = 8;
+      geometry = new THREE.CylinderGeometry(
+        finalWidth / 2, // radiusTop
+        finalWidth / 2, // radiusBottom
+        thickness, // height
+        segments, // radialSegments
+        1, // heightSegments
+        false, // openEnded
+        0, // thetaStart
+        Math.PI * (0.8 + this.config.nailCurvature * 0.4) // thetaLength - partial cylinder for curve
+      );
+      // Rotate to lay flat
+      geometry.rotateZ(Math.PI / 2);
+      geometry.scale(1, finalHeight / finalWidth, 1);
+    } else {
+      // Standard rectangular prism
+      geometry = new THREE.BoxGeometry(finalWidth, finalHeight, thickness);
+    }
 
     let mesh = this.nailMeshes.get(key);
 
     if (!mesh) {
-      // Create new mesh
-      const material = this.config.showWireframe
-        ? this.wireframeMaterial
-        : this.nailMaterial;
+      // Create new mesh - choose material based on config
+      let material: THREE.Material;
+      if (this.config.showWireframe) {
+        material = this.wireframeMaterial;
+      } else if (this.config.metallicIntensity > 0.6) {
+        material = this.metallicMaterial;
+      } else {
+        material = this.nailMaterial;
+      }
+
       mesh = new THREE.Mesh(geometry, material);
       mesh.castShadow = true;
       mesh.receiveShadow = true;
 
       this.scene.add(mesh);
       this.nailMeshes.set(key, mesh);
-
-      console.log(`Created new nail mesh for ${key}`);
     } else {
       // Update existing mesh geometry
       mesh.geometry.dispose();
@@ -220,41 +279,35 @@ export class ThreeNailOverlay {
     mesh.position.set(
       threeX,
       threeY,
-      thickness / 2 // Slightly above the surface
+      thickness // Position at thickness level, not half
     );
 
     // Apply nail rotation - rotate around Z axis to match nail orientation
     // The nail angle is already in the correct coordinate system from nailMatching
     mesh.rotation.z = match.nailAngle;
 
-    // Debug logging (remove in production)
-    if (Math.random() < 0.1) {
-      console.log(`3D Nail ${key}:`, {
-        canvas: scaledCentroid,
-        three: [threeX, threeY],
-        angle: ((match.nailAngle * 180) / Math.PI).toFixed(1) + "°",
-        size: [finalWidth.toFixed(1), finalHeight.toFixed(1)],
-        canvasSize: [this.config.canvasWidth, this.config.canvasHeight],
-      });
+    // Add dynamic 3D rotation if enabled
+    if (this.config.enable3DRotation) {
+      const time = Date.now() * 0.001;
+      mesh.rotation.x = Math.sin(time * 0.5 + key.charCodeAt(0)) * 0.15; // Subtle X tilt
+      mesh.rotation.y = Math.cos(time * 0.3 + key.charCodeAt(1)) * 0.1; // Subtle Y tilt
+    } else {
+      mesh.rotation.x = 0.1; // Slight permanent tilt to show 3D
+      mesh.rotation.y = 0.05;
     }
 
-    // Add some dynamic rotation for visual interest
-    // Temporarily disabled for debugging - uncomment when positioning is correct
-    // const time = Date.now() * 0.001;
-    // mesh.rotation.x = Math.sin(time * 0.5) * 0.1; // Subtle X tilt
-    // mesh.rotation.y = Math.cos(time * 0.3) * 0.05; // Subtle Y tilt
-    mesh.rotation.x = 0;
-    mesh.rotation.y = 0;
-
     // Update material color based on confidence
-    if (
-      !this.config.showWireframe &&
-      mesh.material instanceof THREE.MeshPhongMaterial
-    ) {
+    if (!this.config.showWireframe) {
       const confidence = match.matchConfidence;
       const hue = confidence * 0.3; // 0 (red) to 0.3 (green)
       const color = new THREE.Color().setHSL(hue, 0.8, 0.6);
-      mesh.material.color = color;
+
+      if (
+        mesh.material instanceof THREE.MeshStandardMaterial ||
+        mesh.material instanceof THREE.MeshPhysicalMaterial
+      ) {
+        mesh.material.color = color;
+      }
     }
   }
 
@@ -335,6 +388,7 @@ export class ThreeNailOverlay {
 
     // Dispose of materials
     this.nailMaterial.dispose();
+    this.metallicMaterial.dispose();
     this.wireframeMaterial.dispose();
 
     // Remove renderer from DOM
@@ -346,7 +400,7 @@ export class ThreeNailOverlay {
     this.renderer.dispose();
 
     this.isInitialized = false;
-    console.log("Three.js nail overlay disposed");
+    console.log("3D nail overlay disposed successfully");
   }
 
   /**
@@ -354,7 +408,74 @@ export class ThreeNailOverlay {
    */
   public setNailColor(color: number): void {
     this.nailMaterial.color.setHex(color);
+    this.metallicMaterial.color.setHex(color);
     this.render();
+  }
+
+  /**
+   * Set metallic intensity (0-1)
+   */
+  public setMetallicIntensity(intensity: number): void {
+    this.config.metallicIntensity = Math.max(0, Math.min(1, intensity));
+    this.nailMaterial.metalness = this.config.metallicIntensity;
+    this.metallicMaterial.metalness = Math.max(
+      0.6,
+      this.config.metallicIntensity
+    );
+
+    // Switch materials based on metallic intensity
+    this.nailMeshes.forEach((mesh) => {
+      if (!this.config.showWireframe) {
+        mesh.material =
+          this.config.metallicIntensity > 0.6
+            ? this.metallicMaterial
+            : this.nailMaterial;
+      }
+    });
+
+    this.render();
+  }
+
+  /**
+   * Set surface roughness (0-1)
+   */
+  public setRoughness(roughness: number): void {
+    this.config.roughness = Math.max(0, Math.min(1, roughness));
+    this.nailMaterial.roughness = this.config.roughness;
+    this.metallicMaterial.roughness = this.config.roughness * 0.5; // Keep metallic smoother
+    this.render();
+  }
+
+  /**
+   * Enable/disable reflections
+   */
+  public setReflectionsEnabled(enabled: boolean): void {
+    this.config.enableReflections = enabled;
+    this.metallicMaterial.reflectivity = enabled ? 0.9 : 0.3;
+    this.render();
+  }
+
+  /**
+   * Enable/disable 3D rotation animation
+   */
+  public set3DRotationEnabled(enabled: boolean): void {
+    this.config.enable3DRotation = enabled;
+    if (!enabled) {
+      // Reset rotations to flat
+      this.nailMeshes.forEach((mesh) => {
+        mesh.rotation.x = 0;
+        mesh.rotation.y = 0;
+      });
+    }
+    this.render();
+  }
+
+  /**
+   * Set nail curvature (0-1)
+   */
+  public setNailCurvature(curvature: number): void {
+    this.config.nailCurvature = Math.max(0, Math.min(1, curvature));
+    // Note: Existing meshes will update their curvature on next updateNailOverlays call
   }
 
   /**
@@ -364,6 +485,7 @@ export class ThreeNailOverlay {
     this.config.enableLighting = enabled;
     this.ambientLight.visible = enabled;
     this.directionalLight.visible = enabled;
+    this.pointLight.visible = enabled;
     this.render();
   }
 
