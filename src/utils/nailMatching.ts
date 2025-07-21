@@ -14,11 +14,12 @@ export interface NailFingerMatch {
   nailDetection: YoloDetection;
   fingertipIndex: number; // MediaPipe finger index (4=thumb, 8=index, 12=middle, 16=ring, 20=pinky)
   fingertipPosition: [number, number];
-  fingerDirection: [number, number]; // Unit vector pointing from finger base toward tip
+  fingerDirection: [number, number]; // Unit vector pointing from finger base toward tip (nail longitudinal axis)
   nailCentroid: [number, number];
-  nailWidth: number;
-  nailHeight: number;
-  nailAngle: number; // Rotation angle in radians
+  nailWidth: number; // Length along finger direction (longitudinal)
+  nailHeight: number; // Width perpendicular to finger direction (transverse)
+  nailAngle: number; // Rotation angle in radians (aligned with finger direction)
+  nailPerpendicularDirection: [number, number]; // Unit vector perpendicular to finger direction
   matchConfidence: number; // How confident we are in this match (0-1)
   handIndex: number; // Which hand this belongs to
   handedness: "Left" | "Right";
@@ -55,18 +56,30 @@ function calculateNailCentroid(detection: YoloDetection): [number, number] {
 }
 
 /**
- * Calculate nail dimensions and orientation with finger direction constraint
+ * Calculate nail dimensions and orientation aligned with finger direction
+ * Returns dimensions where:
+ * - width = length along finger direction (longitudinal)
+ * - height = width perpendicular to finger direction (transverse)
+ * - angle = finger direction angle
  */
 function calculateNailDimensions(
   detection: YoloDetection,
-  fingerDirection?: [number, number]
+  fingerDirection: [number, number]
 ): {
   width: number;
   height: number;
   angle: number;
+  perpendicularDirection: [number, number];
 } {
+  // Always use finger direction as the primary orientation
+  const angle = Math.atan2(fingerDirection[1], fingerDirection[0]);
+  const perpendicularDirection: [number, number] = [
+    -fingerDirection[1],
+    fingerDirection[0],
+  ];
+
   if (detection.maskPolygon && detection.maskPolygon.length > 4) {
-    // For polygons, use Principal Component Analysis for better orientation
+    // For polygons, project points onto finger direction axes to get dimensions
     const polygon = detection.maskPolygon;
 
     // Calculate centroid
@@ -75,104 +88,51 @@ function calculateNailDimensions(
     const centroidY =
       polygon.reduce((sum, p) => sum + p[1], 0) / polygon.length;
 
-    // Calculate covariance matrix elements
-    let cxx = 0,
-      cxy = 0,
-      cyy = 0;
+    // Project all points onto finger direction and perpendicular direction
+    let minLongitudinal = Infinity,
+      maxLongitudinal = -Infinity;
+    let minTransverse = Infinity,
+      maxTransverse = -Infinity;
+
     polygon.forEach((point) => {
       const dx = point[0] - centroidX;
       const dy = point[1] - centroidY;
-      cxx += dx * dx;
-      cxy += dx * dy;
-      cyy += dy * dy;
+
+      // Project onto finger direction (longitudinal axis)
+      const longitudinal = dx * fingerDirection[0] + dy * fingerDirection[1];
+      minLongitudinal = Math.min(minLongitudinal, longitudinal);
+      maxLongitudinal = Math.max(maxLongitudinal, longitudinal);
+
+      // Project onto perpendicular direction (transverse axis)
+      const transverse =
+        dx * perpendicularDirection[0] + dy * perpendicularDirection[1];
+      minTransverse = Math.min(minTransverse, transverse);
+      maxTransverse = Math.max(maxTransverse, transverse);
     });
 
-    // Normalize by number of points
-    cxx /= polygon.length;
-    cxy /= polygon.length;
-    cyy /= polygon.length;
-
-    // Find eigenvalues and eigenvectors
-    const trace = cxx + cyy;
-    const det = cxx * cyy - cxy * cxy;
-    const lambda1 = (trace + Math.sqrt(trace * trace - 4 * det)) / 2;
-    const lambda2 = (trace - Math.sqrt(trace * trace - 4 * det)) / 2;
-
-    // Principal direction (eigenvector corresponding to larger eigenvalue)
-    let primaryDirection: [number, number];
-    if (Math.abs(cxy) > 1e-6) {
-      primaryDirection = [lambda1 - cyy, cxy];
-      const norm = Math.sqrt(
-        primaryDirection[0] * primaryDirection[0] +
-          primaryDirection[1] * primaryDirection[1]
-      );
-      primaryDirection = [
-        primaryDirection[0] / norm,
-        primaryDirection[1] / norm,
-      ];
-    } else {
-      primaryDirection = cxx > cyy ? [1, 0] : [0, 1];
-    }
-
-    // If we have finger direction, constrain nail orientation
-    let finalDirection = primaryDirection;
-    if (fingerDirection) {
-      // Calculate dot product to see alignment
-      const dot =
-        primaryDirection[0] * fingerDirection[0] +
-        primaryDirection[1] * fingerDirection[1];
-
-      // If the directions are more perpendicular than parallel, flip the nail direction
-      if (Math.abs(dot) < 0.7) {
-        // Allow some deviation but prefer alignment
-        // Try the perpendicular direction
-        const perpDirection: [number, number] = [
-          -primaryDirection[1],
-          primaryDirection[0],
-        ];
-        const perpDot =
-          perpDirection[0] * fingerDirection[0] +
-          perpDirection[1] * fingerDirection[1];
-
-        if (Math.abs(perpDot) > Math.abs(dot)) {
-          finalDirection = perpDirection;
-        }
-      }
-
-      // Ensure direction points roughly in the same direction as finger
-      const finalDot =
-        finalDirection[0] * fingerDirection[0] +
-        finalDirection[1] * fingerDirection[1];
-      if (finalDot < 0) {
-        finalDirection = [-finalDirection[0], -finalDirection[1]];
-      }
-    }
-
-    const angle = Math.atan2(finalDirection[1], finalDirection[0]);
-
-    // Calculate dimensions based on eigenvalues
-    const width = Math.sqrt(lambda1) * 4; // Scale factor to get reasonable dimensions
-    const height = Math.sqrt(lambda2) * 4;
+    const longitudinalLength = maxLongitudinal - minLongitudinal;
+    const transverseLength = maxTransverse - minTransverse;
 
     return {
-      width: Math.max(width, height), // Ensure width is the longer dimension
-      height: Math.min(width, height),
-      angle: width > height ? angle : angle + Math.PI / 2,
+      width: longitudinalLength, // Length along finger
+      height: transverseLength, // Width across finger
+      angle: angle,
+      perpendicularDirection: perpendicularDirection,
     };
   } else {
-    // Fallback to bounding box with finger direction constraint
-    const [, , width, height] = detection.bbox;
-    let angle = width > height ? 0 : Math.PI / 2;
+    // Fallback to bounding box aligned with finger direction
+    const [, , bboxWidth, bboxHeight] = detection.bbox;
 
-    // If we have finger direction, align with it
-    if (fingerDirection) {
-      angle = Math.atan2(fingerDirection[1], fingerDirection[0]);
-    }
+    // Use the larger dimension as the longitudinal (along finger) dimension
+    // This is a reasonable assumption for nail shapes
+    const longitudinalLength = Math.max(bboxWidth, bboxHeight);
+    const transverseLength = Math.min(bboxWidth, bboxHeight);
 
     return {
-      width: Math.max(width, height),
-      height: Math.min(width, height),
+      width: longitudinalLength,
+      height: transverseLength,
       angle: angle,
+      perpendicularDirection: perpendicularDirection,
     };
   }
 }
@@ -328,19 +288,18 @@ export function matchNailsToFingertips(
       });
 
       // If we found a good match, create the nail-finger match
-      if (bestMatch !== null) {
+      if (bestMatch) {
         const fingerDirection = calculateFingerDirection(hand, fingerIndex);
-        // @ts-ignore - TypeScript has trouble with the null check but this is safe
-        const nailCentroid = calculateNailCentroid(bestMatch.detection);
-        // @ts-ignore - TypeScript has trouble with the null check but this is safe
+        const nailCentroid = calculateNailCentroid(
+          (bestMatch as any).detection
+        );
         const nailDimensions = calculateNailDimensions(
-          bestMatch.detection,
+          (bestMatch as any).detection,
           fingerDirection
         );
 
         const match: NailFingerMatch = {
-          // @ts-ignore - TypeScript has trouble with the null check but this is safe
-          nailDetection: bestMatch.detection,
+          nailDetection: (bestMatch as any).detection,
           fingertipIndex: tipIndex,
           fingertipPosition: fingertipPos,
           fingerDirection: fingerDirection,
@@ -348,8 +307,8 @@ export function matchNailsToFingertips(
           nailWidth: nailDimensions.width,
           nailHeight: nailDimensions.height,
           nailAngle: nailDimensions.angle,
-          // @ts-ignore - TypeScript has trouble with the null check but this is safe
-          matchConfidence: bestMatch.confidence,
+          nailPerpendicularDirection: nailDimensions.perpendicularDirection,
+          matchConfidence: (bestMatch as any).confidence,
           handIndex: handIndex,
           handedness: hand.handedness as "Left" | "Right",
         };
@@ -357,17 +316,12 @@ export function matchNailsToFingertips(
         matches.push(match);
 
         console.log(
-          `✓ Matched nail to ${hand.handedness} ${FINGER_NAMES[fingerIndex]} finger:`,
-          {
-            // @ts-ignore - TypeScript has trouble with the null check but this is safe
-            confidence: bestMatch.confidence.toFixed(3),
-            // @ts-ignore - TypeScript has trouble with the null check but this is safe
-            distance: bestMatch.distance.toFixed(1),
-            nailSize: `${nailDimensions.width.toFixed(
-              1
-            )}×${nailDimensions.height.toFixed(1)}`,
-            angle: `${((nailDimensions.angle * 180) / Math.PI).toFixed(1)}°`,
-          }
+          `✓ Matched nail to ${hand.handedness} ${
+            FINGER_NAMES[fingerIndex]
+          } finger: conf=${match.matchConfidence.toFixed(3)}, angle=${(
+            (match.nailAngle * 180) /
+            Math.PI
+          ).toFixed(1)}°`
         );
       }
     });
@@ -454,7 +408,8 @@ export function drawNailFingerMatches(
     ctx.fill();
     ctx.stroke();
 
-    // Draw improved nail orientation indicator
+    // Draw improved nail orientation indicators
+    // Primary axis (longitudinal - along finger direction) in magenta
     const dirLength = Math.max(
       30,
       Math.min(match.nailWidth, match.nailHeight) *
@@ -464,7 +419,7 @@ export function drawNailFingerMatches(
     const dirX = Math.cos(match.nailAngle) * dirLength;
     const dirY = Math.sin(match.nailAngle) * dirLength;
 
-    // Main orientation line (thicker, more visible)
+    // Longitudinal axis (finger direction) - thicker magenta line
     ctx.strokeStyle = "#ff00ff";
     ctx.lineWidth = 4;
     ctx.setLineDash([]);
@@ -473,14 +428,27 @@ export function drawNailFingerMatches(
     ctx.lineTo(scaledCentroid[0] + dirX, scaledCentroid[1] + dirY);
     ctx.stroke();
 
-    // Add arrow heads to show direction
+    // Perpendicular axis (transverse - across finger) in cyan
+    const perpDirX = match.nailPerpendicularDirection[0] * (dirLength * 0.7);
+    const perpDirY = match.nailPerpendicularDirection[1] * (dirLength * 0.7);
+
+    ctx.strokeStyle = "#00ffff";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(scaledCentroid[0] - perpDirX, scaledCentroid[1] - perpDirY);
+    ctx.lineTo(scaledCentroid[0] + perpDirX, scaledCentroid[1] + perpDirY);
+    ctx.stroke();
+
+    // Add arrow heads to show longitudinal direction
     const arrowSize = 8;
     const arrowAngle = Math.PI / 6; // 30 degrees
 
-    // Arrow head at the positive end
+    // Arrow head at the positive end of longitudinal axis
     const endX = scaledCentroid[0] + dirX;
     const endY = scaledCentroid[1] + dirY;
 
+    ctx.strokeStyle = "#ff00ff";
+    ctx.lineWidth = 3;
     ctx.beginPath();
     ctx.moveTo(endX, endY);
     ctx.lineTo(
@@ -494,14 +462,14 @@ export function drawNailFingerMatches(
     );
     ctx.stroke();
 
-    // Draw finger direction for comparison (thinner, different color)
+    // Draw finger direction reference line (from fingertip, orange dashed)
     const fingerDirLength = dirLength * 0.8;
     const fingerDirX = match.fingerDirection[0] * fingerDirLength;
     const fingerDirY = match.fingerDirection[1] * fingerDirLength;
 
     ctx.strokeStyle = "#ffaa00";
     ctx.lineWidth = 2;
-    ctx.setLineDash([4, 4]);
+    ctx.setLineDash([6, 3]);
     ctx.beginPath();
     ctx.moveTo(scaledFingertip[0], scaledFingertip[1]);
     ctx.lineTo(
@@ -510,36 +478,50 @@ export function drawNailFingerMatches(
     );
     ctx.stroke();
 
-    // Draw confidence and finger info with better styling
+    // Draw labels with orientation info
     const fingerName =
       FINGER_NAMES[FINGER_TIPS.indexOf(match.fingertipIndex)] || "Unknown";
     const label = `${match.handedness} ${fingerName}`;
     const confLabel = `${(match.matchConfidence * 100).toFixed(0)}%`;
     const angleLabel = `${((match.nailAngle * 180) / Math.PI).toFixed(0)}°`;
+    const dimensionLabel = `L:${match.nailWidth.toFixed(
+      0
+    )} T:${match.nailHeight.toFixed(0)}`;
 
     ctx.font = "bold 12px Arial";
     const labelWidth =
       Math.max(
         ctx.measureText(label).width,
         ctx.measureText(confLabel).width,
-        ctx.measureText(angleLabel).width
+        ctx.measureText(angleLabel).width,
+        ctx.measureText(dimensionLabel).width
       ) + 8;
 
     // Background for better readability
-    ctx.fillStyle = "rgba(0, 0, 0, 0.8)";
+    ctx.fillStyle = "rgba(0, 0, 0, 0.9)";
     ctx.fillRect(
       scaledCentroid[0] + 12,
-      scaledCentroid[1] - 35,
+      scaledCentroid[1] - 45,
       labelWidth,
-      45
+      60
     );
 
-    // Text labels
+    // Text labels with color coding
     ctx.fillStyle = "#ffffff";
-    ctx.fillText(label, scaledCentroid[0] + 16, scaledCentroid[1] - 20);
+    ctx.fillText(label, scaledCentroid[0] + 16, scaledCentroid[1] - 30);
     ctx.fillStyle = "#00ff88";
-    ctx.fillText(confLabel, scaledCentroid[0] + 16, scaledCentroid[1] - 5);
+    ctx.fillText(confLabel, scaledCentroid[0] + 16, scaledCentroid[1] - 15);
     ctx.fillStyle = "#ff00ff";
-    ctx.fillText(angleLabel, scaledCentroid[0] + 16, scaledCentroid[1] + 10);
+    ctx.fillText(
+      `Long: ${angleLabel}`,
+      scaledCentroid[0] + 16,
+      scaledCentroid[1]
+    );
+    ctx.fillStyle = "#00ffff";
+    ctx.fillText(
+      dimensionLabel,
+      scaledCentroid[0] + 16,
+      scaledCentroid[1] + 15
+    );
   });
 }
