@@ -29,6 +29,11 @@ export interface ThreeNailOverlayConfig {
   enableReflections: boolean;
   enable3DRotation: boolean; // Enable subtle 3D rotation for visual interest
   nailCurvature: number; // 0-1, how curved the nail surface is (0 = flat rectangular, 1 = curved/cylindrical)
+
+  // New enhanced features
+  enableDynamicLighting?: boolean; // Enable animated lighting effects
+  enableEnvironmentMapping?: boolean; // Enable realistic reflections
+  nailVariety?: boolean; // Enable different materials per finger
 }
 
 export class ThreeNailOverlay {
@@ -42,11 +47,17 @@ export class ThreeNailOverlay {
   private config: ThreeNailOverlayConfig;
   private containerElement: HTMLElement;
   private isInitialized = false;
+  private animationId: number | null = null;
 
   // Materials for the nail prisms
   private nailMaterial!: THREE.MeshStandardMaterial;
   private wireframeMaterial!: THREE.MeshBasicMaterial;
   private metallicMaterial!: THREE.MeshPhysicalMaterial;
+
+  // Additional specialized materials for variety
+  private glossyMaterial!: THREE.MeshPhysicalMaterial;
+  private matteMaterial!: THREE.MeshStandardMaterial;
+  private holographicMaterial!: THREE.MeshPhysicalMaterial;
 
   constructor(containerElement: HTMLElement, config: ThreeNailOverlayConfig) {
     this.containerElement = containerElement;
@@ -93,8 +104,9 @@ export class ThreeNailOverlay {
       color: 0xffb6d9, // Soft pink color for press-on nails
       transparent: true,
       opacity: config.nailOpacity,
-      metalness: config.metallicIntensity || 0.4, // Slightly more metallic for nail polish effect
-      roughness: config.roughness || 0.3, // Smoother for nail polish shine
+      metalness: config.metallicIntensity || 0.4,
+      roughness: config.roughness || 0.3,
+      envMapIntensity: 1.5, // Enhanced environment mapping
     });
 
     this.metallicMaterial = new THREE.MeshPhysicalMaterial({
@@ -102,10 +114,13 @@ export class ThreeNailOverlay {
       transparent: true,
       opacity: config.nailOpacity,
       metalness: config.metallicIntensity || 0.8,
-      roughness: config.roughness || 0.15, // Very smooth for high-gloss nail effect
+      roughness: config.roughness || 0.15,
       clearcoat: 1.0,
-      clearcoatRoughness: 0.05, // Very smooth clearcoat for nail polish effect
+      clearcoatRoughness: 0.05,
       reflectivity: config.enableReflections ? 0.9 : 0.3,
+      envMapIntensity: 2.0, // Strong environment reflections
+      sheen: 0.5, // Add subtle sheen for nail polish effect
+      sheenRoughness: 0.2,
     });
 
     this.wireframeMaterial = new THREE.MeshBasicMaterial({
@@ -114,6 +129,9 @@ export class ThreeNailOverlay {
       transparent: true,
       opacity: 0.8,
     });
+
+    // Create additional specialized materials
+    this.createSpecializedMaterials();
 
     // Set up lighting
     this.setupLighting();
@@ -126,37 +144,153 @@ export class ThreeNailOverlay {
   }
 
   private setupLighting(): void {
-    // Ambient light for general illumination
-    this.ambientLight = new THREE.AmbientLight(0x404040, 0.3);
+    // Enhanced ambient light for better base illumination
+    this.ambientLight = new THREE.AmbientLight(0x404040, 0.4);
     this.scene.add(this.ambientLight);
 
-    // Main directional light for primary shadows and highlights
-    this.directionalLight = new THREE.DirectionalLight(0xffffff, 1.0);
-    this.directionalLight.position.set(100, 100, 200);
+    // Main directional light with improved positioning for nail highlights
+    this.directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    this.directionalLight.position.set(150, 150, 300);
     this.directionalLight.castShadow = true;
 
-    // Configure shadow properties
-    this.directionalLight.shadow.mapSize.width = 2048;
-    this.directionalLight.shadow.mapSize.height = 2048;
+    // Enhanced shadow properties for better definition
+    this.directionalLight.shadow.mapSize.width = 4096;
+    this.directionalLight.shadow.mapSize.height = 4096;
     this.directionalLight.shadow.camera.near = 0.5;
-    this.directionalLight.shadow.camera.far = 500;
-    this.directionalLight.shadow.camera.left = -200;
-    this.directionalLight.shadow.camera.right = 200;
-    this.directionalLight.shadow.camera.top = 200;
-    this.directionalLight.shadow.camera.bottom = -200;
+    this.directionalLight.shadow.camera.far = 800;
+    this.directionalLight.shadow.camera.left = -300;
+    this.directionalLight.shadow.camera.right = 300;
+    this.directionalLight.shadow.camera.top = 300;
+    this.directionalLight.shadow.camera.bottom = -300;
+    this.directionalLight.shadow.bias = -0.0001;
 
     this.scene.add(this.directionalLight);
 
-    // Add a point light for enhanced metallic reflections
-    this.pointLight = new THREE.PointLight(0xffffff, 0.8, 400);
-    this.pointLight.position.set(-50, 50, 150);
+    // Enhanced point light for metallic reflections and highlights
+    this.pointLight = new THREE.PointLight(0xffffff, 1.0, 500);
+    this.pointLight.position.set(-80, 80, 200);
     this.pointLight.castShadow = true;
+    this.pointLight.shadow.mapSize.width = 2048;
+    this.pointLight.shadow.mapSize.height = 2048;
     this.scene.add(this.pointLight);
 
-    // Add rim lighting for better 3D appearance
-    const rimLight = new THREE.DirectionalLight(0x8888ff, 0.4);
-    rimLight.position.set(-100, -50, 100);
-    this.scene.add(rimLight);
+    // Add multiple rim lights for better 3D definition
+    const rimLight1 = new THREE.DirectionalLight(0x8888ff, 0.6);
+    rimLight1.position.set(-150, -80, 150);
+    this.scene.add(rimLight1);
+
+    const rimLight2 = new THREE.DirectionalLight(0xff8888, 0.4);
+    rimLight2.position.set(150, -80, 150);
+    this.scene.add(rimLight2);
+
+    // Add a fill light to reduce harsh shadows
+    const fillLight = new THREE.DirectionalLight(0xffffff, 0.3);
+    fillLight.position.set(0, -100, 100);
+    this.scene.add(fillLight);
+
+    // Add dynamic lighting that follows the camera perspective
+    this.setupDynamicLighting();
+  }
+
+  /**
+   * Setup dynamic lighting that enhances the 3D effect
+   */
+  private setupDynamicLighting(): void {
+    // Create a light that simulates screen reflection
+    const screenLight = new THREE.PointLight(0xffffff, 0.5, 400);
+    screenLight.position.set(0, 0, 250);
+    this.scene.add(screenLight);
+
+    // Add subtle colored accent lights for visual interest
+    const accentLight1 = new THREE.PointLight(0xff99dd, 0.3, 300);
+    accentLight1.position.set(100, 100, 100);
+    this.scene.add(accentLight1);
+
+    const accentLight2 = new THREE.PointLight(0x99ddff, 0.3, 300);
+    accentLight2.position.set(-100, -100, 100);
+    this.scene.add(accentLight2);
+
+    // Create environment map for realistic reflections
+    this.createEnvironmentMap();
+  }
+
+  /**
+   * Create a simple environment map for realistic reflections
+   */
+  private createEnvironmentMap(): void {
+    // Create a simple gradient environment map
+    const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
+
+    // Create a simple sky-like environment
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xffffff);
+
+    // Add some geometry to create interesting reflections
+    const geometry = new THREE.SphereGeometry(500, 32, 32);
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      side: THREE.BackSide,
+    });
+    const sphere = new THREE.Mesh(geometry, material);
+    scene.add(sphere);
+
+    const envMap = pmremGenerator.fromScene(scene).texture;
+
+    // Apply environment map to materials
+    this.nailMaterial.envMap = envMap;
+    this.metallicMaterial.envMap = envMap;
+    this.glossyMaterial.envMap = envMap;
+    this.holographicMaterial.envMap = envMap;
+
+    pmremGenerator.dispose();
+  }
+
+  /**
+   * Create additional specialized materials for enhanced nail variety
+   */
+  private createSpecializedMaterials(): void {
+    // High-gloss material for super shiny nails
+    this.glossyMaterial = new THREE.MeshPhysicalMaterial({
+      color: 0xffd6e8,
+      transparent: true,
+      opacity: this.config.nailOpacity,
+      metalness: 0.1,
+      roughness: 0.05,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.01,
+      reflectivity: 1.0,
+      envMapIntensity: 3.0,
+      sheen: 1.0,
+      sheenRoughness: 0.1,
+    });
+
+    // Matte material for subtle, natural look
+    this.matteMaterial = new THREE.MeshStandardMaterial({
+      color: 0xf5c6d6,
+      transparent: true,
+      opacity: this.config.nailOpacity,
+      metalness: 0.0,
+      roughness: 0.8,
+      envMapIntensity: 0.3,
+    });
+
+    // Holographic/iridescent material for special effects
+    this.holographicMaterial = new THREE.MeshPhysicalMaterial({
+      color: 0xe6b3ff,
+      transparent: true,
+      opacity: this.config.nailOpacity,
+      metalness: 0.9,
+      roughness: 0.1,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.02,
+      reflectivity: 1.0,
+      envMapIntensity: 5.0,
+      sheen: 1.0,
+      sheenRoughness: 0.05,
+      iridescence: 1.0,
+      iridescenceIOR: 2.0,
+      iridescenceThicknessRange: [100, 800],
+    });
   }
 
   /**
@@ -191,6 +325,65 @@ export class ThreeNailOverlay {
 
     // Always render the scene (test cube or nail meshes)
     this.render();
+
+    // Start animation loop if 3D rotation is enabled
+    if (this.config.enable3DRotation && !this.animationId) {
+      this.startAnimationLoop();
+    } else if (!this.config.enable3DRotation && this.animationId) {
+      this.stopAnimationLoop();
+    }
+  }
+
+  /**
+   * Start the animation loop for dynamic effects
+   */
+  private startAnimationLoop(): void {
+    if (this.animationId) return;
+
+    const animate = () => {
+      if (!this.isInitialized || !this.config.enable3DRotation) {
+        this.animationId = null;
+        return;
+      }
+
+      // Animate lighting for dynamic effect
+      this.animateLighting();
+
+      // Re-render the scene
+      this.render();
+
+      this.animationId = requestAnimationFrame(animate);
+    };
+
+    this.animationId = requestAnimationFrame(animate);
+  }
+
+  /**
+   * Stop the animation loop
+   */
+  private stopAnimationLoop(): void {
+    if (this.animationId) {
+      cancelAnimationFrame(this.animationId);
+      this.animationId = null;
+    }
+  }
+
+  /**
+   * Animate lighting for dynamic visual effects
+   */
+  private animateLighting(): void {
+    const time = Date.now() * 0.001;
+
+    // Subtle breathing effect on ambient light
+    this.ambientLight.intensity = 0.4 + Math.sin(time * 0.5) * 0.1;
+
+    // Gentle movement of the main point light
+    this.pointLight.position.x = -80 + Math.sin(time * 0.3) * 20;
+    this.pointLight.position.y = 80 + Math.cos(time * 0.4) * 15;
+
+    // Subtle color temperature variation
+    const colorTemp = 0.5 + Math.sin(time * 0.2) * 0.1;
+    this.directionalLight.color.setHSL(0, 0, 1 - colorTemp * 0.1);
   }
 
   private createNailKey(match: NailFingerMatch): string {
@@ -227,45 +420,48 @@ export class ThreeNailOverlay {
       nailLength = nailWidth * idealRatio;
     }
 
+    // FIXED: Account for foreshortening when nails are viewed at steep angles
+    // When fingers point down (claw position), nails appear smaller due to perspective
+    const [dx, dy, dz] = match.fingerDirection;
+    const viewAngle = Math.abs(Math.atan2(dy, Math.sqrt(dx * dx + dz * dz)));
+    const foreshortening = Math.cos(viewAngle);
+
+    // Apply perspective correction to prevent nails from becoming too small
+    const perspectiveScale = Math.max(0.7, foreshortening + 0.3); // Minimum 70% of original size
+    nailLength *= perspectiveScale;
+    nailWidth *= perspectiveScale;
+
     // Make the nail thickness proportional to size but keep it thin like a real nail
-    const thickness = Math.max(2, Math.min(4, nailWidth * 0.15)); // Create nail-shaped geometry - use a rounded rectangle that's more nail-like
+    const thickness = Math.max(2, Math.min(6, nailWidth * 0.2));
+
+    // Create anatomically accurate nail-shaped geometry
     let geometry: THREE.BufferGeometry;
 
-    if (this.config.nailCurvature > 0) {
-      // Create a nail-shaped geometry with subtle curvature
-      // Use a cylinder geometry but make it oval and nail-proportioned
-      const segments = 12; // More segments for smoother curves
-      geometry = new THREE.CylinderGeometry(
-        nailWidth / 2, // radiusTop
-        nailWidth / 2.2, // radiusBottom - slightly tapered for nail shape
-        thickness, // height (thickness)
-        segments, // radialSegments
-        1, // heightSegments
-        false, // openEnded
-        0, // thetaStart
-        Math.PI * 2 // Full circle
+    if (this.config.nailCurvature > 0.1) {
+      // Create a realistic nail shape with proper curvature
+      geometry = this.createAnatomicalNailGeometry(
+        nailLength,
+        nailWidth,
+        thickness
       );
-
-      // Scale to nail proportions and rotate to lay flat
-      geometry.rotateX(Math.PI / 2); // Rotate to lie flat in XY plane
-      geometry.scale(nailLength / nailWidth, 1, 1); // Stretch to nail length along X-axis
     } else {
-      // Create a rectangular nail shape with length along X-axis
-      // This ensures that when we rotate by nailAngle, the length aligns with finger direction
-      geometry = new THREE.BoxGeometry(nailLength, nailWidth, thickness);
+      // Create a more refined rounded rectangle for flat nails
+      geometry = this.createRoundedNailGeometry(
+        nailLength,
+        nailWidth,
+        thickness
+      );
     }
 
     let mesh = this.nailMeshes.get(key);
 
     if (!mesh) {
-      // Create new mesh - choose material based on config
+      // Create new mesh - choose material based on config and finger characteristics
       let material: THREE.Material;
       if (this.config.showWireframe) {
         material = this.wireframeMaterial;
-      } else if (this.config.metallicIntensity > 0.6) {
-        material = this.metallicMaterial;
       } else {
-        material = this.nailMaterial;
+        material = this.selectMaterialForFinger(match);
       }
 
       mesh = new THREE.Mesh(geometry, material);
@@ -278,9 +474,14 @@ export class ThreeNailOverlay {
       // Update existing mesh geometry
       mesh.geometry.dispose();
       mesh.geometry = geometry;
+
+      // Update material if not in wireframe mode
+      if (!this.config.showWireframe) {
+        mesh.material = this.selectMaterialForFinger(match);
+      }
     }
 
-    // Position the mesh at the nail centroid (convert to Three.js coordinate system)
+    // Position the mesh at the nail centroid with improved depth positioning
     const scaledCentroid = [
       match.nailCentroid[0] * scaleX,
       match.nailCentroid[1] * scaleY,
@@ -292,31 +493,180 @@ export class ThreeNailOverlay {
     const threeX = scaledCentroid[0] - this.config.canvasWidth / 2;
     const threeY = -(scaledCentroid[1] - this.config.canvasHeight / 2); // Flip Y and center
 
+    // Calculate a more realistic Z position based on finger type and perspective
+    const baseZ = thickness / 2;
+    const fingerTypeZ = this.calculateFingerDepth(match);
+    const perspectiveZ = this.calculatePerspectiveDepth(match, scaleX, scaleY);
+
+    // Add extra depth based on rotation to make nails appear to "sit" on fingertips
+    const rotationDepthOffset = this.calculateRotationDepthOffset(match);
+
     mesh.position.set(
       threeX,
       threeY,
-      thickness / 2 // Position at half thickness to center the nail
+      baseZ + fingerTypeZ + perspectiveZ + rotationDepthOffset
     );
 
     // Apply comprehensive 3D nail rotation for realistic positioning
     this.applyNailRotation(mesh, match, key, thickness);
 
-    // Update material color based on confidence - use more nail-appropriate colors
-    if (!this.config.showWireframe) {
-      const confidence = match.matchConfidence;
-      // Use nail polish colors: from red (low confidence) to pink (high confidence)
-      const hue = 0.9 + confidence * 0.1; // 0.9 (magenta) to 1.0 (red) - nail polish range
-      const saturation = 0.6 + confidence * 0.3; // More saturated for higher confidence
-      const lightness = 0.4 + confidence * 0.2; // Brighter for higher confidence
-      const color = new THREE.Color().setHSL(hue, saturation, lightness);
+    // Update material color based on confidence and finger characteristics
+    this.updateMaterialColor(mesh, match);
+  }
 
-      if (
-        mesh.material instanceof THREE.MeshStandardMaterial ||
-        mesh.material instanceof THREE.MeshPhysicalMaterial
-      ) {
-        mesh.material.color = color;
+  /**
+   * Select the most appropriate material for a specific finger based on characteristics
+   */
+  private selectMaterialForFinger(match: NailFingerMatch): THREE.Material {
+    const confidence = match.matchConfidence;
+    const fingerType = match.fingertipIndex;
+
+    // High confidence fingers get special materials
+    if (confidence > 0.8) {
+      // Thumb and index finger often have more prominent/glossy nails
+      if (fingerType === 4 || fingerType === 8) {
+        return this.config.metallicIntensity > 0.7
+          ? this.holographicMaterial
+          : this.glossyMaterial;
+      }
+      return this.config.metallicIntensity > 0.6
+        ? this.metallicMaterial
+        : this.glossyMaterial;
+    }
+
+    // Medium confidence gets standard materials
+    if (confidence > 0.5) {
+      return this.config.metallicIntensity > 0.6
+        ? this.metallicMaterial
+        : this.nailMaterial;
+    }
+
+    // Lower confidence gets matte material for subtlety
+    return this.matteMaterial;
+  }
+
+  /**
+   * Update material color based on confidence and finger characteristics
+   */
+  private updateMaterialColor(mesh: THREE.Mesh, match: NailFingerMatch): void {
+    if (this.config.showWireframe) return;
+
+    const confidence = match.matchConfidence;
+    const fingerType = match.fingertipIndex;
+
+    // Create finger-specific color variations
+    let baseHue = 0.9; // Default magenta base
+
+    // Different fingers get slightly different base colors for variety
+    switch (fingerType) {
+      case 4: // Thumb - slightly more red
+        baseHue = 0.95;
+        break;
+      case 8: // Index - standard pink
+        baseHue = 0.9;
+        break;
+      case 12: // Middle - slightly more purple
+        baseHue = 0.85;
+        break;
+      case 16: // Ring - warmer pink
+        baseHue = 0.92;
+        break;
+      case 20: // Pinky - cooler pink
+        baseHue = 0.88;
+        break;
+    }
+
+    // Adjust hue based on confidence
+    const hue = baseHue + confidence * 0.05;
+    const saturation = 0.5 + confidence * 0.4; // More saturated for higher confidence
+    const lightness = 0.35 + confidence * 0.25; // Brighter for higher confidence
+
+    const color = new THREE.Color().setHSL(hue, saturation, lightness);
+
+    // Apply color to the material
+    if (
+      mesh.material instanceof THREE.MeshStandardMaterial ||
+      mesh.material instanceof THREE.MeshPhysicalMaterial
+    ) {
+      mesh.material.color = color;
+    }
+  }
+
+  /**
+   * Create anatomically accurate nail geometry with natural curvature
+   */
+  private createAnatomicalNailGeometry(
+    length: number,
+    width: number,
+    thickness: number
+  ): THREE.BufferGeometry {
+    // Create a nail shape that mimics the natural curve of human nails
+    // This uses a combination of sphere and cylinder geometries
+
+    const segments = 16; // High detail for smooth curves
+    const geometry = new THREE.SphereGeometry(1, segments, segments / 2);
+
+    // Scale to nail proportions
+    geometry.scale(length / 2, width / 2, thickness / 4);
+
+    // Flatten the top to create a nail-like surface
+    const positions = geometry.attributes.position;
+    for (let i = 0; i < positions.count; i++) {
+      const z = positions.getZ(i);
+      if (z > 0) {
+        // Flatten the top surface while maintaining slight curvature
+        positions.setZ(i, Math.min(z, thickness / 6));
       }
     }
+
+    positions.needsUpdate = true;
+    geometry.computeVertexNormals();
+
+    return geometry;
+  }
+
+  /**
+   * Create a refined rounded nail geometry for more realistic appearance
+   */
+  private createRoundedNailGeometry(
+    length: number,
+    width: number,
+    thickness: number
+  ): THREE.BufferGeometry {
+    // Create a rounded rectangle that looks more like a real nail
+    const segments = 12;
+
+    // Start with a cylinder and modify it
+    const geometry = new THREE.CylinderGeometry(
+      width / 2,
+      width / 2.1, // Slight taper
+      thickness,
+      segments,
+      1,
+      false
+    );
+
+    // Rotate to lay flat and scale to nail proportions
+    geometry.rotateX(Math.PI / 2);
+    geometry.scale(length / width, 1, 1);
+
+    // Add subtle roundedness to the corners
+    const positions = geometry.attributes.position;
+    for (let i = 0; i < positions.count; i++) {
+      const x = positions.getX(i);
+      const y = positions.getY(i);
+
+      // Round the corners slightly
+      if (Math.abs(x) > length * 0.35) {
+        const factor = 0.95;
+        positions.setY(i, y * factor);
+      }
+    }
+
+    positions.needsUpdate = true;
+    geometry.computeVertexNormals();
+
+    return geometry;
   }
 
   /**
@@ -346,7 +696,7 @@ export class ThreeNailOverlay {
 
   /**
    * Apply comprehensive 3D nail rotation for realistic positioning
-   * Handles Z-axis alignment, natural finger curvature, and 3D depth rotation
+   * Simplified rotation application with better visual results
    */
   private applyNailRotation(
     mesh: THREE.Mesh,
@@ -357,141 +707,380 @@ export class ThreeNailOverlay {
     // Reset all rotations to start fresh
     mesh.rotation.set(0, 0, 0);
 
-    // 1. Primary Z-axis rotation: Align nail with finger direction
-    // The nail angle from nailMatching represents the finger direction in canvas coordinates
-    // Since we flip Y coordinates when converting to Three.js, we need to negate the angle
-    // to maintain the correct orientation relative to the flipped coordinate system
-    const primaryRotationZ = -match.nailAngle;
-    mesh.rotation.z = primaryRotationZ;
+    // Calculate the 3D orientation with improved algorithms
+    const rotation = this.calculate3DNailOrientation(match);
 
-    // 2. Natural nail curvature based on finger type and position
-    const fingerCurvature = this.calculateFingerCurvature(match);
+    // Apply rotations in the proper order for realistic nail positioning
+    mesh.rotation.x = rotation.tiltX; // Forward/backward tilt (the key improvement!)
+    mesh.rotation.y = rotation.tiltY; // Left/right tilt
+    mesh.rotation.z = rotation.tiltZ; // In-plane rotation (finger direction alignment)
 
-    // 3. Apply X-axis rotation for natural nail tilt toward fingertip
-    // Real nails are not completely flat - they curve slightly toward the fingertip
-    let tiltX = fingerCurvature.longitudinalTilt;
+    // Set rotation order to XYZ for most natural nail orientation
+    mesh.rotation.order = "XYZ";
 
-    // 4. Apply Y-axis rotation for lateral nail curvature
-    // Nails curve slightly along their width, especially on curved fingers
-    let tiltY = fingerCurvature.lateralTilt;
-
-    // 5. Add dynamic 3D rotation if enabled for visual interest
+    // Add subtle dynamic 3D rotation if enabled for visual interest
     if (this.config.enable3DRotation) {
       const time = Date.now() * 0.001;
-      // Use finger-specific seeds for consistent but varied animation
       const fingerSeed =
         match.fingertipIndex * 7 + (match.handedness === "Left" ? 0 : 31);
 
-      // Subtle breathing/floating animation - much more natural than previous version
-      const breatheX = Math.sin(time * 0.3 + fingerSeed * 0.1) * 0.02; // Very subtle longitudinal sway
-      const breatheY = Math.cos(time * 0.4 + fingerSeed * 0.15) * 0.015; // Gentle lateral motion
-      const breatheZ = Math.sin(time * 0.25 + fingerSeed * 0.2) * 0.01; // Minor twist variation
+      // Subtle breathing effects that enhance the 3D appearance
+      const breatheX = Math.sin(time * 0.3 + fingerSeed * 0.1) * 0.08; // Gentle forward/back motion
+      const breatheY = Math.cos(time * 0.4 + fingerSeed * 0.15) * 0.05; // Subtle side-to-side
+      const breatheZ = Math.sin(time * 0.25 + fingerSeed * 0.2) * 0.03; // Minimal rotation
 
-      tiltX += breatheX;
-      tiltY += breatheY;
-      mesh.rotation.z += breatheZ; // Add to primary rotation
+      mesh.rotation.x += breatheX;
+      mesh.rotation.y += breatheY;
+      mesh.rotation.z += breatheZ;
     }
 
-    // Apply the calculated rotations
-    mesh.rotation.x = tiltX;
-    mesh.rotation.y = tiltY;
-
-    // 6. Apply proper rotation order for realistic nail positioning
-    // Set the rotation order to ZYX so Z-axis (finger alignment) is applied first,
-    // then Y-axis (lateral curvature), then X-axis (longitudinal tilt)
-    mesh.rotation.order = "ZYX";
-
-    // Debug: Log rotation information occasionally
-    if (Math.random() < 0.05) {
-      // Only log occasionally to avoid spam
-      console.log(`3D Nail rotation for ${key}:`, {
+    // Debug output for troubleshooting (reduced frequency)
+    if (Math.random() < 0.02) {
+      console.log(`🎯 Applied Rotation for ${key}:`, {
         fingerType: this.getFingerName(match.fingertipIndex),
-        handedness: match.handedness,
-        primaryAngle: (primaryRotationZ * 180) / Math.PI,
-        longitudinalTilt: (tiltX * 180) / Math.PI,
-        lateralTilt: (tiltY * 180) / Math.PI,
-        fingerDirection: match.fingerDirection,
-        curvature: fingerCurvature,
+        tiltX_deg: (mesh.rotation.x * 180) / Math.PI,
+        tiltY_deg: (mesh.rotation.y * 180) / Math.PI,
+        tiltZ_deg: (mesh.rotation.z * 180) / Math.PI,
+        confidence: match.matchConfidence,
       });
     }
   }
 
   /**
-   * Calculate natural finger curvature based on finger type and position
+   * Calculate complete 3D nail orientation based on finger position and anatomy
+   * Simplified and more reliable approach
    */
-  private calculateFingerCurvature(match: NailFingerMatch): {
-    longitudinalTilt: number;
-    lateralTilt: number;
+  private calculate3DNailOrientation(match: NailFingerMatch): {
+    tiltX: number; // Forward/backward tilt (pitch)
+    tiltY: number; // Left/right tilt (roll)
+    tiltZ: number; // In-plane rotation (yaw)
   } {
+    const confidence = match.matchConfidence;
+
+    // Calculate each rotation component independently for better control
+    let tiltZ = this.calculateImprovedFingerAlignment(match);
+    let tiltX = this.calculateForwardBackwardTilt(match);
+    let tiltY = this.calculateLeftRightTilt(match);
+
+    // Apply confidence scaling - less confident matches get more conservative rotations
+    const confidenceScale = Math.pow(
+      Math.min(1.0, Math.max(0.3, confidence)),
+      0.5
+    );
+    tiltX *= confidenceScale;
+    tiltY *= confidenceScale;
+    // Don't scale tiltZ as much since finger direction is usually reliable
+
+    // Apply global curvature multiplier for user control
+    const curvatureMultiplier = Math.max(0.1, this.config.nailCurvature);
+    tiltX *= curvatureMultiplier;
+    tiltY *= curvatureMultiplier;
+
+    // Debug the final calculations occasionally
+    if (Math.random() < 0.05) {
+      console.log(
+        `🎯 Final 3D Orientation for ${this.getFingerName(
+          match.fingertipIndex
+        )}:`,
+        {
+          fingerType: this.getFingerName(match.fingertipIndex),
+          handedness: match.handedness,
+          confidence: confidence,
+          confidenceScale: confidenceScale,
+          tiltX_degrees: (tiltX * 180) / Math.PI,
+          tiltY_degrees: (tiltY * 180) / Math.PI,
+          tiltZ_degrees: (tiltZ * 180) / Math.PI,
+        }
+      );
+    }
+
+    return { tiltX, tiltY, tiltZ };
+  }
+
+  /**
+   * Calculate improved finger alignment accounting for coordinate system issues
+   * Fixed to handle all finger orientations properly
+   */
+  private calculateImprovedFingerAlignment(match: NailFingerMatch): number {
+    // Now we have true 3D finger direction!
+    const [dx, dy, dz] = match.fingerDirection;
+
+    // FIXED: Use the actual 3D finger direction for more accurate alignment
+    // Project the 3D direction onto the screen plane, considering all orientations
+    let fingerAngle = Math.atan2(dy, dx);
+
+    // CRITICAL FIX: Don't flip Y coordinate here - let the natural direction be preserved
+    // The previous -fingerAngle was causing issues with downward-pointing fingers
+
+    // Add confidence-based adjustments for low-confidence matches
+    const confidence = match.matchConfidence;
+    if (confidence < 0.6) {
+      // For very low confidence, blend with anatomical expectations
+      const anatomicalAngle = this.calculateAnatomicalExpectedAngle(match);
+      const blendFactor = (0.6 - confidence) * 2.0; // Stronger blending for lower confidence
+      fingerAngle =
+        fingerAngle * (1 - blendFactor) + anatomicalAngle * blendFactor;
+    }
+
+    // Debug the improved calculation
+    if (Math.random() < 0.05) {
+      console.log(
+        `🧭 Fixed Finger Alignment for ${this.getFingerName(
+          match.fingertipIndex
+        )}:`,
+        {
+          fingerDirection3D: match.fingerDirection,
+          fingerAngle_degrees: (fingerAngle * 180) / Math.PI,
+          confidence: confidence,
+          dy_component: dy, // This should show negative values for downward fingers
+        }
+      );
+    }
+
+    return fingerAngle;
+  }
+  /**
+   * Calculate anatomically expected angle for finger alignment
+   * Simplified to focus on basic anatomical positions
+   */
+  private calculateAnatomicalExpectedAngle(match: NailFingerMatch): number {
     const fingerType = match.fingertipIndex;
     const handedness = match.handedness;
 
-    // Base curvature values for different finger types (in radians)
-    let longitudinalTilt = 0;
-    let lateralTilt = 0;
-
-    // Different fingers have different natural nail orientations
+    // Simplified anatomical expectations based on typical finger orientations
     switch (fingerType) {
       case 4: // Thumb
-        // Thumbs typically angle more toward the palm and have more lateral curvature
-        longitudinalTilt = 0.08; // ~4.6 degrees toward palm
-        lateralTilt = handedness === "Left" ? -0.06 : 0.06; // Curve toward other fingers
-        break;
-
+        return handedness === "Left" ? Math.PI * 0.25 : -Math.PI * 0.25; // ±45°
       case 8: // Index finger
-        // Index fingers are relatively straight but tilt slightly toward middle finger
-        longitudinalTilt = 0.04; // ~2.3 degrees
-        lateralTilt = handedness === "Left" ? 0.02 : -0.02; // Slight inward curve
-        break;
-
+        return Math.PI * 0.5; // 90° (typically pointing up)
       case 12: // Middle finger
-        // Middle fingers are most straight, minimal curvature
-        longitudinalTilt = 0.02; // ~1.1 degrees
-        lateralTilt = 0; // Straight lateral alignment
-        break;
-
+        return Math.PI * 0.5; // 90° (typically pointing up)
       case 16: // Ring finger
-        // Ring fingers curve slightly toward pinky
-        longitudinalTilt = 0.03; // ~1.7 degrees
-        lateralTilt = handedness === "Left" ? 0.025 : -0.025; // Slight outward curve
-        break;
-
+        return Math.PI * 0.5; // 90° (typically pointing up)
       case 20: // Pinky
-        // Pinkies have more pronounced curvature and angle
-        longitudinalTilt = 0.06; // ~3.4 degrees
-        lateralTilt = handedness === "Left" ? 0.04 : -0.04; // More pronounced outward curve
-        break;
-
+        return handedness === "Left" ? Math.PI * 0.75 : -Math.PI * 0.75; // ±135°
       default:
-        // Default minimal curvature
-        longitudinalTilt = 0.02;
-        lateralTilt = 0;
+        return Math.PI * 0.5; // Default to pointing up
+    }
+  }
+
+  /**
+   * Calculate forward/backward tilt based on finger anatomy and 3D direction
+   * Fixed to handle extreme angles better and prevent over-rotation
+   */
+  private calculateForwardBackwardTilt(match: NailFingerMatch): number {
+    const fingerType = match.fingertipIndex;
+
+    // Extract the Z component from the 3D finger direction
+    const [dx, dy, dz] = match.fingerDirection;
+
+    // FIXED: More conservative depth tilt calculation
+    // Use atan instead of atan2 for more stable results
+    const xyMagnitude = Math.sqrt(dx * dx + dy * dy);
+    let depthTilt = 0;
+
+    if (xyMagnitude > 0.01) {
+      // Avoid division by very small numbers
+      depthTilt = Math.atan(dz / xyMagnitude);
     }
 
-    // Apply additional hand orientation adjustments based on viewing angle
-    // When hands are viewed from different angles, the natural curvature appears different
-    const fingerDirection = match.fingerDirection;
-    const handAngle = Math.atan2(fingerDirection[1], fingerDirection[0]);
+    // FIXED: Less aggressive scaling to prevent extreme rotations
+    depthTilt *= 1.5; // Reduced from 3.0 to 1.5 for more natural appearance
 
-    // Adjust curvature based on overall hand orientation
-    // This makes nails look more natural when hands are rotated
-    const handOrientationFactor = Math.cos(handAngle) * 0.02; // Small adjustment
-    longitudinalTilt += handOrientationFactor;
+    // Anatomical base tilts - nails naturally tilt based on finger curvature
+    let anatomicalTilt = 0;
+    switch (fingerType) {
+      case 4: // Thumb - significant natural curve
+        anatomicalTilt = 0.3; // Reduced from 0.4 (~17 degrees)
+        break;
+      case 8: // Index finger - moderate curve
+        anatomicalTilt = 0.2; // Reduced from 0.25 (~11 degrees)
+        break;
+      case 12: // Middle finger - slight curve
+        anatomicalTilt = 0.15; // Kept same (~9 degrees)
+        break;
+      case 16: // Ring finger - moderate curve
+        anatomicalTilt = 0.18; // Slightly reduced (~10 degrees)
+        break;
+      case 20: // Pinky - significant curve
+        anatomicalTilt = 0.25; // Reduced from 0.35 (~14 degrees)
+        break;
+    }
 
-    // Apply confidence-based scaling - less confident matches get less extreme rotations
-    const confidenceScale = Math.min(1.0, Math.max(0.3, match.matchConfidence));
-    longitudinalTilt *= confidenceScale;
-    lateralTilt *= confidenceScale;
+    // Combine depth-based tilt with anatomical expectations
+    const totalTilt = anatomicalTilt + depthTilt;
 
-    // Apply global curvature setting
-    const curvatureMultiplier = this.config.nailCurvature;
-    longitudinalTilt *= curvatureMultiplier;
-    lateralTilt *= curvatureMultiplier;
+    // FIXED: More restrictive clamping to prevent extreme rotations
+    const clampedTilt = Math.max(
+      -Math.PI / 4,
+      Math.min(Math.PI / 3, totalTilt)
+    ); // -45° to +60°
 
-    return {
-      longitudinalTilt,
-      lateralTilt,
-    };
+    // Debug the improved calculation
+    if (Math.random() < 0.05) {
+      console.log(
+        `🎯 Fixed Depth Tilt for ${this.getFingerName(match.fingertipIndex)}:`,
+        {
+          fingerDirection3D: match.fingerDirection,
+          dz_component: dz,
+          xyMagnitude: xyMagnitude,
+          depthTilt_degrees: (depthTilt * 180) / Math.PI,
+          anatomicalTilt_degrees: (anatomicalTilt * 180) / Math.PI,
+          totalTilt_degrees: (totalTilt * 180) / Math.PI,
+          clampedTilt_degrees: (clampedTilt * 180) / Math.PI,
+        }
+      );
+    }
+
+    return clampedTilt;
+  }
+
+  /**
+   * Calculate depth offset based on finger type for more realistic positioning
+   * Simplified to focus on basic finger anatomy
+   */
+  private calculateFingerDepth(match: NailFingerMatch): number {
+    const fingerType = match.fingertipIndex;
+
+    // Different fingers naturally appear at different depths
+    switch (fingerType) {
+      case 4: // Thumb
+        return 6; // Thumbs stick out moderately
+      case 8: // Index finger
+        return 4; // Index is prominent
+      case 12: // Middle finger
+        return 5; // Middle finger is longest
+      case 16: // Ring finger
+        return 3; // Ring finger is slightly recessed
+      case 20: // Pinky
+        return 2; // Pinky is shortest
+      default:
+        return 3;
+    }
+  }
+
+  /**
+   * Calculate left/right tilt based on 3D finger direction and hand anatomy
+   * Fixed to handle extreme angles better
+   */
+  private calculateLeftRightTilt(match: NailFingerMatch): number {
+    const fingerType = match.fingertipIndex;
+    const handedness = match.handedness;
+    const [dx, dy, dz] = match.fingerDirection;
+
+    // FIXED: More stable lateral tilt calculation
+    // Use the 3D finger direction but be more conservative
+    const yzMagnitude = Math.sqrt(dy * dy + dz * dz);
+    let lateralTilt = 0;
+
+    if (yzMagnitude > 0.01) {
+      // Avoid division by very small numbers
+      lateralTilt = Math.atan(dx / yzMagnitude);
+    }
+
+    // FIXED: Less aggressive scaling for more natural appearance
+    lateralTilt *= 1.0; // Reduced from 1.5 to 1.0
+
+    // Add anatomical corrections based on finger type and handedness
+    let anatomicalCorrection = 0;
+    switch (fingerType) {
+      case 4: // Thumb - significant lateral angle
+        anatomicalCorrection = handedness === "Left" ? -0.1 : 0.1; // Reduced from ±0.15
+        break;
+      case 8: // Index finger - slight lateral angle
+        anatomicalCorrection = handedness === "Left" ? 0.03 : -0.03; // Reduced from ±0.05
+        break;
+      case 12: // Middle finger - most neutral
+        anatomicalCorrection = 0;
+        break;
+      case 16: // Ring finger - slight lateral angle
+        anatomicalCorrection = handedness === "Left" ? 0.03 : -0.03; // Reduced from ±0.05
+        break;
+      case 20: // Pinky - moderate lateral angle
+        anatomicalCorrection = handedness === "Left" ? 0.07 : -0.07; // Reduced from ±0.1
+        break;
+    }
+
+    const totalTilt = lateralTilt + anatomicalCorrection;
+
+    // FIXED: More conservative clamping
+    return Math.max(-Math.PI / 6, Math.min(Math.PI / 6, totalTilt)); // Max ±30 degrees (reduced from ±45)
+  }
+
+  /**
+   * Calculate perspective-based depth for more realistic 3D appearance
+   */
+  private calculatePerspectiveDepth(
+    match: NailFingerMatch,
+    scaleX: number,
+    scaleY: number
+  ): number {
+    // Calculate distance from center for perspective effect
+    const centerX = this.config.canvasWidth / 2;
+    const centerY = this.config.canvasHeight / 2;
+
+    const scaledCentroid = [
+      match.nailCentroid[0] * scaleX,
+      match.nailCentroid[1] * scaleY,
+    ];
+
+    const distanceFromCenter = Math.sqrt(
+      Math.pow(scaledCentroid[0] - centerX, 2) +
+        Math.pow(scaledCentroid[1] - centerY, 2)
+    );
+
+    // Normalize distance and apply subtle perspective depth
+    const maxDistance = Math.sqrt(centerX * centerX + centerY * centerY);
+    const normalizedDistance = distanceFromCenter / maxDistance;
+
+    // Fingers further from center appear slightly more recessed
+    return -normalizedDistance * 5;
+  }
+
+  /**
+   * Calculate additional depth offset based on nail rotation for more realistic positioning
+   */
+  private calculateRotationDepthOffset(match: NailFingerMatch): number {
+    // Calculate how much the nail should be offset in Z based on its tilt
+    // This makes nails appear to properly "sit" on the fingertips
+
+    const fingerType = match.fingertipIndex;
+
+    // More tilted fingers (like thumb and pinky) should have more depth variation
+    let rotationFactor = 0;
+
+    switch (fingerType) {
+      case 4: // Thumb - significant rotation offset
+        rotationFactor = 8;
+        break;
+      case 8: // Index finger
+        rotationFactor = 4;
+        break;
+      case 12: // Middle finger - most neutral
+        rotationFactor = 2;
+        break;
+      case 16: // Ring finger
+        rotationFactor = 5;
+        break;
+      case 20: // Pinky - significant rotation offset
+        rotationFactor = 7;
+        break;
+    }
+
+    // Calculate distance from center for additional perspective effect
+    const centerX = this.config.canvasWidth / 2;
+    const centerY = this.config.canvasHeight / 2;
+    const nailX = match.nailCentroid[0];
+    const nailY = match.nailCentroid[1];
+
+    const distanceFromCenter = Math.sqrt(
+      Math.pow(nailX - centerX, 2) + Math.pow(nailY - centerY, 2)
+    );
+    const maxDistance = Math.sqrt(centerX * centerX + centerY * centerY);
+    const normalizedDistance = distanceFromCenter / maxDistance;
+
+    // Combine rotation factor with distance for realistic depth
+    return rotationFactor * (1 + normalizedDistance * 0.5);
   }
 
   /**
@@ -571,6 +1160,9 @@ export class ThreeNailOverlay {
   public dispose(): void {
     if (!this.isInitialized) return;
 
+    // Stop animation loop
+    this.stopAnimationLoop();
+
     // Dispose of all meshes and geometries
     this.nailMeshes.forEach((mesh) => {
       mesh.geometry.dispose();
@@ -587,6 +1179,9 @@ export class ThreeNailOverlay {
     this.nailMaterial.dispose();
     this.metallicMaterial.dispose();
     this.wireframeMaterial.dispose();
+    this.glossyMaterial.dispose();
+    this.matteMaterial.dispose();
+    this.holographicMaterial.dispose();
 
     // Remove renderer from DOM
     if (this.containerElement.contains(this.renderer.domElement)) {
@@ -657,8 +1252,13 @@ export class ThreeNailOverlay {
    */
   public set3DRotationEnabled(enabled: boolean): void {
     this.config.enable3DRotation = enabled;
-    // Note: We don't reset rotations here because static natural curvature should remain
-    // The 3D animation will simply stop adding dynamic movement on the next update cycle
+
+    if (enabled) {
+      this.startAnimationLoop();
+    } else {
+      this.stopAnimationLoop();
+    }
+
     this.render();
   }
 
@@ -695,5 +1295,58 @@ export class ThreeNailOverlay {
    */
   public getConfig(): ThreeNailOverlayConfig {
     return { ...this.config };
+  }
+
+  /**
+   * Get performance and rendering information
+   */
+  public getPerformanceInfo(): {
+    triangles: number;
+    geometries: number;
+    textures: number;
+    materials: number;
+    meshCount: number;
+  } {
+    const renderer = this.renderer;
+    const info = renderer.info;
+
+    return {
+      triangles: info.render.triangles,
+      geometries: info.memory.geometries,
+      textures: info.memory.textures,
+      materials: info.programs?.length || 0,
+      meshCount: this.nailMeshes.size,
+    };
+  }
+
+  /**
+   * Optimize rendering settings based on performance
+   */
+  public optimizeForPerformance(enableOptimizations: boolean = true): void {
+    if (enableOptimizations) {
+      // Reduce shadow map size for better performance
+      this.directionalLight.shadow.mapSize.width = 2048;
+      this.directionalLight.shadow.mapSize.height = 2048;
+      this.pointLight.shadow.mapSize.width = 1024;
+      this.pointLight.shadow.mapSize.height = 1024;
+
+      // Reduce material quality slightly
+      this.metallicMaterial.envMapIntensity = 1.0;
+      this.glossyMaterial.envMapIntensity = 1.5;
+      this.holographicMaterial.envMapIntensity = 2.0;
+    } else {
+      // Restore high-quality settings
+      this.directionalLight.shadow.mapSize.width = 4096;
+      this.directionalLight.shadow.mapSize.height = 4096;
+      this.pointLight.shadow.mapSize.width = 2048;
+      this.pointLight.shadow.mapSize.height = 2048;
+
+      // Restore full material quality
+      this.metallicMaterial.envMapIntensity = 2.0;
+      this.glossyMaterial.envMapIntensity = 3.0;
+      this.holographicMaterial.envMapIntensity = 5.0;
+    }
+
+    this.render();
   }
 }

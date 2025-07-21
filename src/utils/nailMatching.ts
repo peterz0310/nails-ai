@@ -14,12 +14,12 @@ export interface NailFingerMatch {
   nailDetection: YoloDetection;
   fingertipIndex: number; // MediaPipe finger index (4=thumb, 8=index, 12=middle, 16=ring, 20=pinky)
   fingertipPosition: [number, number];
-  fingerDirection: [number, number]; // Unit vector pointing from finger base toward tip (nail longitudinal axis)
+  fingerDirection: [number, number, number]; // 3D unit vector pointing from finger base toward tip (nail longitudinal axis)
   nailCentroid: [number, number];
   nailWidth: number; // Length along finger direction (longitudinal)
   nailHeight: number; // Width perpendicular to finger direction (transverse)
   nailAngle: number; // Rotation angle in radians (aligned with finger direction)
-  nailPerpendicularDirection: [number, number]; // Unit vector perpendicular to finger direction
+  nailPerpendicularDirection: [number, number]; // Unit vector perpendicular to finger direction (2D for screen coords)
   matchConfidence: number; // How confident we are in this match (0-1)
   handIndex: number; // Which hand this belongs to
   handedness: "Left" | "Right";
@@ -64,18 +64,24 @@ function calculateNailCentroid(detection: YoloDetection): [number, number] {
  */
 function calculateNailDimensions(
   detection: YoloDetection,
-  fingerDirection: [number, number]
+  fingerDirection: [number, number, number]
 ): {
   width: number;
   height: number;
   angle: number;
   perpendicularDirection: [number, number];
 } {
-  // Always use finger direction as the primary orientation
-  const angle = Math.atan2(fingerDirection[1], fingerDirection[0]);
-  const perpendicularDirection: [number, number] = [
-    -fingerDirection[1],
+  // Extract 2D components for nail polygon calculations (screen coordinates)
+  const fingerDirection2D: [number, number] = [
     fingerDirection[0],
+    fingerDirection[1],
+  ];
+
+  // Always use finger direction as the primary orientation
+  const angle = Math.atan2(fingerDirection2D[1], fingerDirection2D[0]);
+  const perpendicularDirection: [number, number] = [
+    -fingerDirection2D[1],
+    fingerDirection2D[0],
   ];
 
   if (detection.maskPolygon && detection.maskPolygon.length > 4) {
@@ -99,7 +105,8 @@ function calculateNailDimensions(
       const dy = point[1] - centroidY;
 
       // Project onto finger direction (longitudinal axis)
-      const longitudinal = dx * fingerDirection[0] + dy * fingerDirection[1];
+      const longitudinal =
+        dx * fingerDirection2D[0] + dy * fingerDirection2D[1];
       minLongitudinal = Math.min(minLongitudinal, longitudinal);
       maxLongitudinal = Math.max(maxLongitudinal, longitudinal);
 
@@ -150,33 +157,82 @@ function distanceBetweenPoints(
 }
 
 /**
- * Calculate finger direction vector from base to tip
+ * Calculate finger direction vector from base to tip (3D)
+ * Enhanced to properly handle MediaPipe coordinate system and provide more stable finger direction
+ * Fixed to handle extreme finger positions better
  */
 function calculateFingerDirection(
   hand: HandDetection,
   fingerIndex: number
-): [number, number] {
+): [number, number, number] {
   const tipIndex = FINGER_TIPS[fingerIndex];
   const baseIndex = FINGER_BASES[fingerIndex];
 
   if (tipIndex >= hand.landmarks.length || baseIndex >= hand.landmarks.length) {
-    return [0, 1]; // Default upward direction
+    return [0, 1, 0]; // Default upward direction
   }
 
   const tip = hand.landmarks[tipIndex];
   const base = hand.landmarks[baseIndex];
 
-  const dx = tip.x - base.x;
-  const dy = tip.y - base.y;
-  const length = Math.sqrt(dx * dx + dy * dy);
+  // For more stable direction calculation, also consider the middle joint
+  // This gives us a more accurate finger direction that's less affected by fingertip wiggling
+  const middleIndex = fingerIndex === 0 ? 3 : baseIndex + 2; // Joint before tip
+  const middle =
+    middleIndex < hand.landmarks.length ? hand.landmarks[middleIndex] : base;
 
-  if (length === 0) return [0, 1];
+  // Calculate vector from base through middle to tip for more stable direction
+  const dx1 = middle.x - base.x;
+  const dy1 = middle.y - base.y;
+  const dz1 = middle.z - base.z;
 
-  return [dx / length, dy / length];
+  const dx2 = tip.x - middle.x;
+  const dy2 = tip.y - middle.y;
+  const dz2 = tip.z - middle.z;
+
+  // Average the two direction vectors for stability
+  let dx = (dx1 + dx2) / 2;
+  let dy = (dy1 + dy2) / 2;
+  let dz = (dz1 + dz2) / 2;
+
+  // FIXED: More conservative Z-scaling to prevent extreme rotations
+  // MediaPipe Z values are in a different scale than X,Y.
+  // Scale Z appropriately for better 3D orientation but avoid extremes
+  dz = dz * 1.5; // Reduced from 2.0 to 1.5 for more stable behavior
+
+  const length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  if (length === 0) return [0, 1, 0];
+
+  // FIXED: Add stabilization for extreme finger positions
+  // Ensure the direction vector doesn't become too extreme in any dimension
+  let normalizedDx = dx / length;
+  let normalizedDy = dy / length;
+  let normalizedDz = dz / length;
+
+  // Clamp individual components to prevent extreme values
+  normalizedDx = Math.max(-0.8, Math.min(0.8, normalizedDx));
+  normalizedDy = Math.max(-0.8, Math.min(0.8, normalizedDy));
+  normalizedDz = Math.max(-0.6, Math.min(0.6, normalizedDz)); // More conservative Z clamping
+
+  // Re-normalize after clamping
+  const clampedLength = Math.sqrt(
+    normalizedDx * normalizedDx +
+      normalizedDy * normalizedDy +
+      normalizedDz * normalizedDz
+  );
+  if (clampedLength > 0) {
+    normalizedDx /= clampedLength;
+    normalizedDy /= clampedLength;
+    normalizedDz /= clampedLength;
+  }
+
+  // Return stabilized normalized 3D direction vector
+  return [normalizedDx, normalizedDy, normalizedDz];
 }
 
 /**
  * Match nails to fingertips using improved proximity and geometric constraints
+ * Enhanced for better 3D orientation data
  */
 export function matchNailsToFingertips(
   nailDetections: YoloDetection[],
@@ -190,16 +246,23 @@ export function matchNailsToFingertips(
     return matches;
   }
 
-  // Improved distance threshold based on frame size
-  const maxReasonableDistance = Math.min(frameWidth, frameHeight) * 0.12; // Reduced to 12% for better precision
+  // Improved distance threshold based on frame size and finger anatomy
+  const maxReasonableDistance = Math.min(frameWidth, frameHeight) * 0.15; // Increased to 15% for better matching
   const minNailSize = frameWidth * frameHeight * 0.0001; // Minimum nail size to consider
   const maxNailSize = frameWidth * frameHeight * 0.02; // Maximum reasonable nail size
 
   console.log(
-    `Matching parameters: maxDistance=${maxReasonableDistance.toFixed(
+    `Enhanced matching parameters: maxDistance=${maxReasonableDistance.toFixed(
       1
     )}, frameSize=${frameWidth}x${frameHeight}`
   );
+
+  // Define interface for match candidates
+  interface MatchCandidate {
+    detection: YoloDetection;
+    distance: number;
+    confidence: number;
+  }
 
   // For each hand
   handDetections.forEach((hand, handIndex) => {
@@ -218,27 +281,16 @@ export function matchNailsToFingertips(
       ];
 
       // Find the best nail detection for this fingertip
-      let bestMatch: {
-        detection: YoloDetection;
-        distance: number;
-        confidence: number;
-      } | null = null;
+      let bestMatch: MatchCandidate | null = null;
 
       nailDetections.forEach((detection, detectionIndex) => {
         const nailCentroid = calculateNailCentroid(detection);
         const dist = distanceBetweenPoints(fingertipPos, nailCentroid);
 
-        // Improved size filtering
+        // Enhanced size filtering
         const nailArea = detection.bbox[2] * detection.bbox[3];
         if (nailArea < minNailSize || nailArea > maxNailSize) {
-          console.log(
-            `Skipping nail ${detectionIndex}: size ${nailArea.toFixed(
-              0
-            )} outside range [${minNailSize.toFixed(0)}, ${maxNailSize.toFixed(
-              0
-            )}]`
-          );
-          return;
+          return; // Skip invalid sizes
         }
 
         // Enhanced confidence calculation with multiple factors
@@ -253,31 +305,42 @@ export function matchNailsToFingertips(
         const sizeScore = Math.max(0.1, Math.min(1, sizeRatio));
 
         // Detection confidence from YOLO
-        const detectionScore = Math.min(1, detection.score * 1.2); // Boost slightly
+        const detectionScore = Math.min(1, detection.score * 1.1); // Slight boost
 
         // Position score: nails should be near the fingertip
         const positionScore = dist < maxReasonableDistance ? 1 : 0;
 
+        // Anatomical plausibility score based on expected nail position relative to finger
+        const anatomicalScore = calculateAnatomicalPlausibility(
+          fingertipPos,
+          nailCentroid,
+          fingerIndex,
+          hand.handedness as "Left" | "Right"
+        );
+
         // Combined confidence with weighted factors
         const confidence =
-          distanceScore * 0.4 +
-          sizeScore * 0.25 +
-          detectionScore * 0.25 +
-          positionScore * 0.1;
+          distanceScore * 0.35 +
+          sizeScore * 0.2 +
+          detectionScore * 0.2 +
+          positionScore * 0.1 +
+          anatomicalScore * 0.15; // New anatomical factor
 
         console.log(
           `Nail ${detectionIndex} -> ${hand.handedness} ${
             FINGER_NAMES[fingerIndex]
           }: dist=${dist.toFixed(1)}, conf=${confidence.toFixed(
-            2
+            3
           )} (d=${distanceScore.toFixed(2)}, s=${sizeScore.toFixed(
             2
-          )}, det=${detectionScore.toFixed(2)})`
+          )}, det=${detectionScore.toFixed(2)}, anat=${anatomicalScore.toFixed(
+            2
+          )})`
         );
 
-        // Higher confidence threshold for better matching
-        if (dist < maxReasonableDistance && confidence > 0.4) {
-          if (!bestMatch || confidence > bestMatch.confidence) {
+        // Slightly lower confidence threshold to allow for more matches
+        if (dist < maxReasonableDistance && confidence > 0.35) {
+          if (bestMatch === null || confidence > bestMatch.confidence) {
             bestMatch = {
               detection,
               distance: dist,
@@ -288,18 +351,17 @@ export function matchNailsToFingertips(
       });
 
       // If we found a good match, create the nail-finger match
-      if (bestMatch) {
+      if (bestMatch !== null) {
+        const matchData = bestMatch as MatchCandidate; // Explicit type assertion
         const fingerDirection = calculateFingerDirection(hand, fingerIndex);
-        const nailCentroid = calculateNailCentroid(
-          (bestMatch as any).detection
-        );
+        const nailCentroid = calculateNailCentroid(matchData.detection);
         const nailDimensions = calculateNailDimensions(
-          (bestMatch as any).detection,
+          matchData.detection,
           fingerDirection
         );
 
         const match: NailFingerMatch = {
-          nailDetection: (bestMatch as any).detection,
+          nailDetection: matchData.detection,
           fingertipIndex: tipIndex,
           fingertipPosition: fingertipPos,
           fingerDirection: fingerDirection,
@@ -308,7 +370,7 @@ export function matchNailsToFingertips(
           nailHeight: nailDimensions.height,
           nailAngle: nailDimensions.angle,
           nailPerpendicularDirection: nailDimensions.perpendicularDirection,
-          matchConfidence: (bestMatch as any).confidence,
+          matchConfidence: matchData.confidence,
           handIndex: handIndex,
           handedness: hand.handedness as "Left" | "Right",
         };
@@ -316,18 +378,17 @@ export function matchNailsToFingertips(
         matches.push(match);
 
         console.log(
-          `✓ Matched nail to ${hand.handedness} ${
+          `✓ Enhanced match: ${hand.handedness} ${
             FINGER_NAMES[fingerIndex]
-          } finger: conf=${match.matchConfidence.toFixed(3)}, angle=${(
-            (match.nailAngle * 180) /
-            Math.PI
-          ).toFixed(1)}°`
+          } - conf=${match.matchConfidence.toFixed(
+            3
+          )}, 3D_dir=[${fingerDirection.map((f) => f.toFixed(2)).join(", ")}]`
         );
       }
     });
   });
 
-  // Improved duplicate removal: prefer higher confidence and closer matches
+  // Enhanced duplicate removal with better conflict resolution
   const uniqueMatches: NailFingerMatch[] = [];
   const usedNails = new Set<YoloDetection>();
   const usedFingers = new Set<string>(); // Track hand+finger combinations
@@ -336,12 +397,18 @@ export function matchNailsToFingertips(
   matches
     .sort((a, b) => {
       const confDiff = b.matchConfidence - a.matchConfidence;
-      if (Math.abs(confDiff) > 0.05) return confDiff; // Significant confidence difference
-      return (
-        a.fingertipPosition[0] +
-        a.fingertipPosition[1] -
-        (b.fingertipPosition[0] + b.fingertipPosition[1])
-      ); // Tie-break by position
+      if (Math.abs(confDiff) > 0.03) return confDiff; // Lower threshold for significant difference
+
+      // For similar confidence, prefer matches with better anatomical alignment
+      const aDistance = distanceBetweenPoints(
+        a.fingertipPosition,
+        a.nailCentroid
+      );
+      const bDistance = distanceBetweenPoints(
+        b.fingertipPosition,
+        b.nailCentroid
+      );
+      return aDistance - bDistance;
     })
     .forEach((match) => {
       const fingerKey = `${match.handIndex}-${match.fingertipIndex}`;
@@ -350,16 +417,82 @@ export function matchNailsToFingertips(
         uniqueMatches.push(match);
         usedNails.add(match.nailDetection);
         usedFingers.add(fingerKey);
-      } else {
-        console.log(`Skipping duplicate: nail or finger already matched`);
       }
     });
 
   console.log(
-    `Successfully matched ${uniqueMatches.length} nails to fingertips (from ${matches.length} candidates)`
+    `Enhanced matching completed: ${uniqueMatches.length} high-quality matches (from ${matches.length} candidates)`
   );
 
   return uniqueMatches;
+}
+
+/**
+ * Calculate anatomical plausibility of a nail-finger match
+ * Returns a score 0-1 based on how anatomically reasonable the match is
+ */
+function calculateAnatomicalPlausibility(
+  fingertipPos: [number, number],
+  nailCentroid: [number, number],
+  fingerIndex: number,
+  handedness: "Left" | "Right"
+): number {
+  // Calculate the vector from fingertip to nail centroid
+  const dx = nailCentroid[0] - fingertipPos[0];
+  const dy = nailCentroid[1] - fingertipPos[1];
+  const angle = Math.atan2(dy, dx);
+
+  // Expected nail positions relative to fingertip based on anatomy
+  let expectedAngleRange: [number, number];
+
+  switch (fingerIndex) {
+    case 0: // Thumb
+      // Thumb nails can be in various orientations depending on thumb position
+      expectedAngleRange = [-Math.PI, Math.PI]; // Very permissive
+      break;
+    case 1: // Index finger
+      // Index nail typically appears slightly behind/below the fingertip
+      expectedAngleRange = [Math.PI * 0.25, Math.PI * 0.75];
+      break;
+    case 2: // Middle finger
+      // Middle finger nail similar to index
+      expectedAngleRange = [Math.PI * 0.25, Math.PI * 0.75];
+      break;
+    case 3: // Ring finger
+      // Ring finger nail similar to index
+      expectedAngleRange = [Math.PI * 0.25, Math.PI * 0.75];
+      break;
+    case 4: // Pinky
+      // Pinky nail similar to other fingers
+      expectedAngleRange = [Math.PI * 0.25, Math.PI * 0.75];
+      break;
+    default:
+      expectedAngleRange = [0, 2 * Math.PI]; // Unknown finger, be permissive
+  }
+
+  // Calculate how well the actual angle fits the expected range
+  let angleScore = 1.0;
+  if (angle < expectedAngleRange[0] || angle > expectedAngleRange[1]) {
+    // Calculate how far outside the expected range
+    const distanceOutside = Math.min(
+      Math.abs(angle - expectedAngleRange[0]),
+      Math.abs(angle - expectedAngleRange[1]),
+      Math.abs(angle + 2 * Math.PI - expectedAngleRange[0]),
+      Math.abs(angle - 2 * Math.PI - expectedAngleRange[1])
+    );
+    angleScore = Math.max(0.2, 1.0 - distanceOutside / Math.PI);
+  }
+
+  // Distance score: nails should be close but not too close to fingertips
+  const distance = Math.sqrt(dx * dx + dy * dy);
+  const optimalDistance = 15; // pixels - typical nail-to-fingertip distance
+  const distanceScore = Math.max(
+    0.2,
+    1.0 - Math.abs(distance - optimalDistance) / optimalDistance
+  );
+
+  // Combine angle and distance scores
+  return angleScore * 0.7 + distanceScore * 0.3;
 }
 
 /**
