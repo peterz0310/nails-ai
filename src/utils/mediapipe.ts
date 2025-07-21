@@ -69,13 +69,18 @@ export const initializeMediaPipeHands = async (): Promise<MediaPipeHands> => {
 
     hands.setOptions({
       maxNumHands: 2,
-      modelComplexity: 0, // Keep at 0 for better performance
-      minDetectionConfidence: 0.6, // Reduced from 0.7 for more detections
-      minTrackingConfidence: 0.6, // Reduced from 0.7 for better tracking
+      // FIXED: Increased model complexity for more accurate landmark positions.
+      // This is crucial for calculating correct 3D orientations. May reduce FPS slightly.
+      modelComplexity: 1,
+      // FIXED: Lowered confidence thresholds to allow for more robust tracking, even in challenging conditions.
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5,
     });
 
     handsModel = hands as MediaPipeHands;
-    console.log("MediaPipe Hands model initialized successfully");
+    console.log(
+      "MediaPipe Hands model initialized successfully with higher accuracy settings"
+    );
     return handsModel;
   } catch (error) {
     console.error("Failed to initialize MediaPipe Hands:", error);
@@ -131,13 +136,8 @@ export const drawHandDetections = (
 ): void => {
   const ctx = canvas.getContext("2d");
   if (!ctx || !hands || hands.length === 0) {
-    console.log("No hands to draw or invalid canvas context");
     return;
   }
-
-  console.log(
-    `Drawing ${hands.length} hands on canvas ${canvas.width}x${canvas.height}`
-  );
 
   hands.forEach((hand, handIndex) => {
     if (!hand.landmarks || hand.landmarks.length === 0) {
@@ -194,10 +194,6 @@ export const drawHandDetections = (
         wristPoint.y - 15
       );
     }
-
-    console.log(
-      `Drew hand ${handIndex}: ${hand.handedness} with ${canvasLandmarks.length} landmarks`
-    );
   });
 };
 
