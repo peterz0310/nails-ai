@@ -113,3 +113,7 @@ npm run lint       # ESLint with Next.js config
 - Rounded rectangle fallback for bounding boxes only
 - Color picker integration with real-time preview
 - Confidence score labels with background fills
+
+## Notes:
+
+- Assume the dev server is already running.

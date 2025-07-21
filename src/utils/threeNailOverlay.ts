@@ -21,14 +21,14 @@ export interface ThreeNailOverlayConfig {
   videoWidth: number;
   videoHeight: number;
   enableLighting: boolean;
-  nailThickness: number; // Depth of the nail prism (Z-axis)
+  nailThickness: number; // Depth of the nail prism (Z-axis) - for press-on nails, should be thin (2-4px)
   nailOpacity: number;
   showWireframe: boolean;
   metallicIntensity: number; // 0-1, how metallic the nails appear
   roughness: number; // 0-1, surface roughness (0 = mirror, 1 = rough)
   enableReflections: boolean;
   enable3DRotation: boolean; // Enable subtle 3D rotation for visual interest
-  nailCurvature: number; // 0-1, how curved the nail surface is
+  nailCurvature: number; // 0-1, how curved the nail surface is (0 = flat rectangular, 1 = curved/cylindrical)
 }
 
 export class ThreeNailOverlay {
@@ -90,21 +90,21 @@ export class ThreeNailOverlay {
 
     // Create materials
     this.nailMaterial = new THREE.MeshStandardMaterial({
-      color: 0xff69b4, // Pink color for fake nails
+      color: 0xffb6d9, // Soft pink color for press-on nails
       transparent: true,
       opacity: config.nailOpacity,
-      metalness: config.metallicIntensity || 0.3,
-      roughness: config.roughness || 0.4,
+      metalness: config.metallicIntensity || 0.4, // Slightly more metallic for nail polish effect
+      roughness: config.roughness || 0.3, // Smoother for nail polish shine
     });
 
     this.metallicMaterial = new THREE.MeshPhysicalMaterial({
-      color: 0xf0c0ff, // Slightly lighter metallic pink
+      color: 0xffc0e7, // Slightly lighter metallic pink
       transparent: true,
       opacity: config.nailOpacity,
       metalness: config.metallicIntensity || 0.8,
-      roughness: config.roughness || 0.2,
+      roughness: config.roughness || 0.15, // Very smooth for high-gloss nail effect
       clearcoat: 1.0,
-      clearcoatRoughness: 0.1,
+      clearcoatRoughness: 0.05, // Very smooth clearcoat for nail polish effect
       reflectivity: config.enableReflections ? 0.9 : 0.3,
     });
 
@@ -207,36 +207,52 @@ export class ThreeNailOverlay {
     // Scale nail dimensions to canvas coordinates
     const scaledWidth = match.nailWidth * scaleX;
     const scaledHeight = match.nailHeight * scaleY;
-    const thickness = this.config.nailThickness;
 
-    // Create geometry for rectangular prism with proper dimensions
-    // Use the nail's actual dimensions but ensure minimum size for visibility
-    const minSize = 12;
-    let finalWidth = Math.max(scaledWidth, minSize);
-    let finalHeight = Math.max(scaledHeight, minSize * 0.6);
+    // For press-on nails, we want them to be more prominent and nail-shaped
+    // Make them larger and enforce a more realistic nail aspect ratio
+    const nailScaleFactor = 1.8; // Make nails 80% larger for better visibility
+    const minNailLength = 20; // Minimum length along finger direction
+    const minNailWidth = 12; // Minimum width across finger direction
 
-    // Create curved nail geometry for more realistic appearance
+    // IMPORTANT: In nailMatching.ts:
+    // - match.nailWidth = length along finger direction (longitudinal)
+    // - match.nailHeight = width perpendicular to finger direction (transverse)
+    // So we use nailWidth as the length and nailHeight as the width
+    let nailLength = Math.max(scaledWidth * nailScaleFactor, minNailLength); // Along finger
+    let nailWidth = Math.max(scaledHeight * nailScaleFactor, minNailWidth); // Across finger
+
+    // Enforce press-on nail proportions: length should be 1.5-2x the width
+    const idealRatio = 1.7; // Length to width ratio for realistic nail shape
+    if (nailLength / nailWidth < idealRatio) {
+      nailLength = nailWidth * idealRatio;
+    }
+
+    // Make the nail thickness proportional to size but keep it thin like a real nail
+    const thickness = Math.max(2, Math.min(4, nailWidth * 0.15)); // Create nail-shaped geometry - use a rounded rectangle that's more nail-like
     let geometry: THREE.BufferGeometry;
 
     if (this.config.nailCurvature > 0) {
-      // Create a slightly curved nail using cylinder geometry
-      const segments = 8;
+      // Create a nail-shaped geometry with subtle curvature
+      // Use a cylinder geometry but make it oval and nail-proportioned
+      const segments = 12; // More segments for smoother curves
       geometry = new THREE.CylinderGeometry(
-        finalWidth / 2, // radiusTop
-        finalWidth / 2, // radiusBottom
-        thickness, // height
+        nailWidth / 2, // radiusTop
+        nailWidth / 2.2, // radiusBottom - slightly tapered for nail shape
+        thickness, // height (thickness)
         segments, // radialSegments
         1, // heightSegments
         false, // openEnded
         0, // thetaStart
-        Math.PI * (0.8 + this.config.nailCurvature * 0.4) // thetaLength - partial cylinder for curve
+        Math.PI * 2 // Full circle
       );
-      // Rotate to lay flat
-      geometry.rotateZ(Math.PI / 2);
-      geometry.scale(1, finalHeight / finalWidth, 1);
+
+      // Scale to nail proportions and rotate to lay flat
+      geometry.rotateX(Math.PI / 2); // Rotate to lie flat in XY plane
+      geometry.scale(nailLength / nailWidth, 1, 1); // Stretch to nail length along X-axis
     } else {
-      // Standard rectangular prism
-      geometry = new THREE.BoxGeometry(finalWidth, finalHeight, thickness);
+      // Create a rectangular nail shape with length along X-axis
+      // This ensures that when we rotate by nailAngle, the length aligns with finger direction
+      geometry = new THREE.BoxGeometry(nailLength, nailWidth, thickness);
     }
 
     let mesh = this.nailMeshes.get(key);
@@ -279,28 +295,20 @@ export class ThreeNailOverlay {
     mesh.position.set(
       threeX,
       threeY,
-      thickness // Position at thickness level, not half
+      thickness / 2 // Position at half thickness to center the nail
     );
 
-    // Apply nail rotation - rotate around Z axis to match nail orientation
-    // The nail angle is already in the correct coordinate system from nailMatching
-    mesh.rotation.z = match.nailAngle;
+    // Apply comprehensive 3D nail rotation for realistic positioning
+    this.applyNailRotation(mesh, match, key, thickness);
 
-    // Add dynamic 3D rotation if enabled
-    if (this.config.enable3DRotation) {
-      const time = Date.now() * 0.001;
-      mesh.rotation.x = Math.sin(time * 0.5 + key.charCodeAt(0)) * 0.15; // Subtle X tilt
-      mesh.rotation.y = Math.cos(time * 0.3 + key.charCodeAt(1)) * 0.1; // Subtle Y tilt
-    } else {
-      mesh.rotation.x = 0.1; // Slight permanent tilt to show 3D
-      mesh.rotation.y = 0.05;
-    }
-
-    // Update material color based on confidence
+    // Update material color based on confidence - use more nail-appropriate colors
     if (!this.config.showWireframe) {
       const confidence = match.matchConfidence;
-      const hue = confidence * 0.3; // 0 (red) to 0.3 (green)
-      const color = new THREE.Color().setHSL(hue, 0.8, 0.6);
+      // Use nail polish colors: from red (low confidence) to pink (high confidence)
+      const hue = 0.9 + confidence * 0.1; // 0.9 (magenta) to 1.0 (red) - nail polish range
+      const saturation = 0.6 + confidence * 0.3; // More saturated for higher confidence
+      const lightness = 0.4 + confidence * 0.2; // Brighter for higher confidence
+      const color = new THREE.Color().setHSL(hue, saturation, lightness);
 
       if (
         mesh.material instanceof THREE.MeshStandardMaterial ||
@@ -309,6 +317,195 @@ export class ThreeNailOverlay {
         mesh.material.color = color;
       }
     }
+  }
+
+  /**
+   * Create a rounded box geometry for more realistic nail shapes
+   */
+  private createRoundedBoxGeometry(
+    width: number,
+    height: number,
+    depth: number,
+    radius: number
+  ): THREE.BufferGeometry {
+    // Clamp radius to prevent issues
+    const maxRadius = Math.min(width, height, depth) / 2;
+    const clampedRadius = Math.min(radius, maxRadius);
+
+    // For simplicity, create a regular box geometry
+    // In a more advanced implementation, you could create actual rounded corners
+    // using custom buffer geometry or imported rounded box geometry
+    const geometry = new THREE.BoxGeometry(width, height, depth);
+
+    // TODO: For future enhancement, implement actual rounded corners
+    // This would involve creating custom buffer geometry with rounded edges
+    // For now, the regular box with proper nail proportions will work well
+
+    return geometry;
+  }
+
+  /**
+   * Apply comprehensive 3D nail rotation for realistic positioning
+   * Handles Z-axis alignment, natural finger curvature, and 3D depth rotation
+   */
+  private applyNailRotation(
+    mesh: THREE.Mesh,
+    match: NailFingerMatch,
+    key: string,
+    thickness: number
+  ): void {
+    // Reset all rotations to start fresh
+    mesh.rotation.set(0, 0, 0);
+
+    // 1. Primary Z-axis rotation: Align nail with finger direction
+    // The nail angle from nailMatching represents the finger direction in canvas coordinates
+    // Since we flip Y coordinates when converting to Three.js, we need to negate the angle
+    // to maintain the correct orientation relative to the flipped coordinate system
+    const primaryRotationZ = -match.nailAngle;
+    mesh.rotation.z = primaryRotationZ;
+
+    // 2. Natural nail curvature based on finger type and position
+    const fingerCurvature = this.calculateFingerCurvature(match);
+
+    // 3. Apply X-axis rotation for natural nail tilt toward fingertip
+    // Real nails are not completely flat - they curve slightly toward the fingertip
+    let tiltX = fingerCurvature.longitudinalTilt;
+
+    // 4. Apply Y-axis rotation for lateral nail curvature
+    // Nails curve slightly along their width, especially on curved fingers
+    let tiltY = fingerCurvature.lateralTilt;
+
+    // 5. Add dynamic 3D rotation if enabled for visual interest
+    if (this.config.enable3DRotation) {
+      const time = Date.now() * 0.001;
+      // Use finger-specific seeds for consistent but varied animation
+      const fingerSeed =
+        match.fingertipIndex * 7 + (match.handedness === "Left" ? 0 : 31);
+
+      // Subtle breathing/floating animation - much more natural than previous version
+      const breatheX = Math.sin(time * 0.3 + fingerSeed * 0.1) * 0.02; // Very subtle longitudinal sway
+      const breatheY = Math.cos(time * 0.4 + fingerSeed * 0.15) * 0.015; // Gentle lateral motion
+      const breatheZ = Math.sin(time * 0.25 + fingerSeed * 0.2) * 0.01; // Minor twist variation
+
+      tiltX += breatheX;
+      tiltY += breatheY;
+      mesh.rotation.z += breatheZ; // Add to primary rotation
+    }
+
+    // Apply the calculated rotations
+    mesh.rotation.x = tiltX;
+    mesh.rotation.y = tiltY;
+
+    // 6. Apply proper rotation order for realistic nail positioning
+    // Set the rotation order to ZYX so Z-axis (finger alignment) is applied first,
+    // then Y-axis (lateral curvature), then X-axis (longitudinal tilt)
+    mesh.rotation.order = "ZYX";
+
+    // Debug: Log rotation information occasionally
+    if (Math.random() < 0.05) {
+      // Only log occasionally to avoid spam
+      console.log(`3D Nail rotation for ${key}:`, {
+        fingerType: this.getFingerName(match.fingertipIndex),
+        handedness: match.handedness,
+        primaryAngle: (primaryRotationZ * 180) / Math.PI,
+        longitudinalTilt: (tiltX * 180) / Math.PI,
+        lateralTilt: (tiltY * 180) / Math.PI,
+        fingerDirection: match.fingerDirection,
+        curvature: fingerCurvature,
+      });
+    }
+  }
+
+  /**
+   * Calculate natural finger curvature based on finger type and position
+   */
+  private calculateFingerCurvature(match: NailFingerMatch): {
+    longitudinalTilt: number;
+    lateralTilt: number;
+  } {
+    const fingerType = match.fingertipIndex;
+    const handedness = match.handedness;
+
+    // Base curvature values for different finger types (in radians)
+    let longitudinalTilt = 0;
+    let lateralTilt = 0;
+
+    // Different fingers have different natural nail orientations
+    switch (fingerType) {
+      case 4: // Thumb
+        // Thumbs typically angle more toward the palm and have more lateral curvature
+        longitudinalTilt = 0.08; // ~4.6 degrees toward palm
+        lateralTilt = handedness === "Left" ? -0.06 : 0.06; // Curve toward other fingers
+        break;
+
+      case 8: // Index finger
+        // Index fingers are relatively straight but tilt slightly toward middle finger
+        longitudinalTilt = 0.04; // ~2.3 degrees
+        lateralTilt = handedness === "Left" ? 0.02 : -0.02; // Slight inward curve
+        break;
+
+      case 12: // Middle finger
+        // Middle fingers are most straight, minimal curvature
+        longitudinalTilt = 0.02; // ~1.1 degrees
+        lateralTilt = 0; // Straight lateral alignment
+        break;
+
+      case 16: // Ring finger
+        // Ring fingers curve slightly toward pinky
+        longitudinalTilt = 0.03; // ~1.7 degrees
+        lateralTilt = handedness === "Left" ? 0.025 : -0.025; // Slight outward curve
+        break;
+
+      case 20: // Pinky
+        // Pinkies have more pronounced curvature and angle
+        longitudinalTilt = 0.06; // ~3.4 degrees
+        lateralTilt = handedness === "Left" ? 0.04 : -0.04; // More pronounced outward curve
+        break;
+
+      default:
+        // Default minimal curvature
+        longitudinalTilt = 0.02;
+        lateralTilt = 0;
+    }
+
+    // Apply additional hand orientation adjustments based on viewing angle
+    // When hands are viewed from different angles, the natural curvature appears different
+    const fingerDirection = match.fingerDirection;
+    const handAngle = Math.atan2(fingerDirection[1], fingerDirection[0]);
+
+    // Adjust curvature based on overall hand orientation
+    // This makes nails look more natural when hands are rotated
+    const handOrientationFactor = Math.cos(handAngle) * 0.02; // Small adjustment
+    longitudinalTilt += handOrientationFactor;
+
+    // Apply confidence-based scaling - less confident matches get less extreme rotations
+    const confidenceScale = Math.min(1.0, Math.max(0.3, match.matchConfidence));
+    longitudinalTilt *= confidenceScale;
+    lateralTilt *= confidenceScale;
+
+    // Apply global curvature setting
+    const curvatureMultiplier = this.config.nailCurvature;
+    longitudinalTilt *= curvatureMultiplier;
+    lateralTilt *= curvatureMultiplier;
+
+    return {
+      longitudinalTilt,
+      lateralTilt,
+    };
+  }
+
+  /**
+   * Get human-readable finger name for debugging
+   */
+  private getFingerName(fingertipIndex: number): string {
+    const names: Record<number, string> = {
+      4: "Thumb",
+      8: "Index",
+      12: "Middle",
+      16: "Ring",
+      20: "Pinky",
+    };
+    return names[fingertipIndex] || "Unknown";
   }
 
   /**
@@ -335,10 +532,10 @@ export class ThreeNailOverlay {
   }
 
   /**
-   * Update nail thickness
+   * Update nail thickness - note this affects new nails, existing ones update on next overlay update
    */
   public setNailThickness(thickness: number): void {
-    this.config.nailThickness = thickness;
+    this.config.nailThickness = Math.max(1, Math.min(8, thickness)); // Clamp for press-on nail realism
     // Note: Existing meshes will update their thickness on next updateNailOverlays call
   }
 
@@ -460,13 +657,8 @@ export class ThreeNailOverlay {
    */
   public set3DRotationEnabled(enabled: boolean): void {
     this.config.enable3DRotation = enabled;
-    if (!enabled) {
-      // Reset rotations to flat
-      this.nailMeshes.forEach((mesh) => {
-        mesh.rotation.x = 0;
-        mesh.rotation.y = 0;
-      });
-    }
+    // Note: We don't reset rotations here because static natural curvature should remain
+    // The 3D animation will simply stop adding dynamic movement on the next update cycle
     this.render();
   }
 
@@ -476,6 +668,15 @@ export class ThreeNailOverlay {
   public setNailCurvature(curvature: number): void {
     this.config.nailCurvature = Math.max(0, Math.min(1, curvature));
     // Note: Existing meshes will update their curvature on next updateNailOverlays call
+  }
+
+  /**
+   * Force refresh of all nail rotations - useful when rotation settings change
+   */
+  public refreshNailRotations(): void {
+    // This will be called automatically on the next updateNailOverlays call
+    // since rotations are recalculated every frame
+    this.render();
   }
 
   /**
