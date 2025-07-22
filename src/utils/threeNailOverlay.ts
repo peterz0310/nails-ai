@@ -107,19 +107,21 @@ export class ThreeNailOverlay {
   }
 
   private createMaterials(): void {
-    // Material for the solid nail base
+    // Single material that can display both color and texture
     this.nailMaterial = new THREE.MeshStandardMaterial({
       color: 0xff6b9d, // Default pink
       transparent: true,
       side: THREE.DoubleSide,
+      // Ensure texture blending works properly
+      alphaTest: 0.01, // Helps with texture transparency
     });
 
-    // Material for the texture overlay (separate from base)
+    // Keep texture material for backwards compatibility but not used anymore
     this.textureMaterial = new THREE.MeshStandardMaterial({
       transparent: true,
       side: THREE.DoubleSide,
       opacity: 0.9,
-      alphaTest: 0.1, // Helps with transparency
+      alphaTest: 0.1,
     });
 
     // Load initial texture if provided
@@ -141,11 +143,15 @@ export class ThreeNailOverlay {
     this.nailMaterial.metalness = this.config.metallicIntensity;
     this.nailMaterial.roughness = this.config.roughness;
     this.nailMaterial.wireframe = this.config.showWireframe;
-    this.nailMaterial.color.setRGB(
-      this.config.nailColor.r / 255,
-      this.config.nailColor.g / 255,
-      this.config.nailColor.b / 255
-    );
+
+    // Only update color if there's no texture (texture should override color)
+    if (!this.nailTexture) {
+      this.nailMaterial.color.setRGB(
+        this.config.nailColor.r / 255,
+        this.config.nailColor.g / 255,
+        this.config.nailColor.b / 255
+      );
+    }
 
     // Debug: Log material state
     console.log("Material updated:", {
@@ -167,9 +173,13 @@ export class ThreeNailOverlay {
     // Update texture opacity if it changed
     if (this.nailTexture && newConfig.textureOpacity !== undefined) {
       if (newConfig.textureOpacity !== oldConfig.textureOpacity) {
-        this.textureMaterial.opacity = newConfig.textureOpacity;
-        this.textureMaterial.needsUpdate = true;
+        // When there's a texture, use the texture opacity for the entire material
+        this.nailMaterial.opacity = newConfig.textureOpacity;
+        this.nailMaterial.needsUpdate = true;
       }
+    } else if (!this.nailTexture) {
+      // When there's no texture, use the nail opacity
+      this.nailMaterial.opacity = this.config.nailOpacity;
     }
 
     // Check if geometry needs to be rebuilt for all meshes
@@ -200,10 +210,14 @@ export class ThreeNailOverlay {
           textureSource,
           (texture) => {
             // Configure texture properties for nail surface
-            texture.wrapS = THREE.RepeatWrapping;
-            texture.wrapT = THREE.RepeatWrapping;
+            texture.wrapS = THREE.ClampToEdgeWrapping; // Changed from RepeatWrapping
+            texture.wrapT = THREE.ClampToEdgeWrapping; // Changed from RepeatWrapping
             texture.repeat.set(1, 1); // Scale texture to fit nail
             texture.flipY = false; // Prevent texture flipping
+            texture.minFilter = THREE.LinearFilter; // Better filtering for small textures
+            texture.magFilter = THREE.LinearFilter; // Better filtering for small textures
+            texture.generateMipmaps = false; // Disable mipmaps for better texture clarity
+            texture.needsUpdate = true; // Force texture update
             resolve(texture);
           },
           undefined, // onProgress
@@ -214,23 +228,33 @@ export class ThreeNailOverlay {
         );
       });
 
-      // Apply texture to the separate texture material
-      this.textureMaterial.map = this.nailTexture;
-      this.textureMaterial.needsUpdate = true;
+      // Apply texture directly to the nail material
+      this.nailMaterial.map = this.nailTexture;
+      this.nailMaterial.needsUpdate = true;
 
-      // Update texture opacity
+      // When texture is applied, adjust material properties for better visibility
+      // Keep the base color but reduce its intensity so texture shows through
+      this.nailMaterial.color.setRGB(1, 1, 1); // White base color lets texture show true colors
+
+      // Set texture opacity (this will affect the entire material)
       if (this.config.textureOpacity !== undefined) {
-        this.textureMaterial.opacity = this.config.textureOpacity;
+        this.nailMaterial.opacity = this.config.textureOpacity;
+      } else {
+        this.nailMaterial.opacity = 0.9; // Default high opacity for texture visibility
       }
 
-      // Create/update texture meshes for existing nails
-      this.updateTextureMeshes();
+      // Force all meshes to update their materials
+      this.nailMeshes.forEach((mesh) => {
+        mesh.material = this.nailMaterial;
+      });
 
-      console.log("Nail texture loaded successfully", {
+      console.log("Nail texture loaded and applied to nail material", {
         width: this.nailTexture.image.width,
         height: this.nailTexture.image.height,
         format: this.nailTexture.format,
         type: this.nailTexture.type,
+        opacity: this.nailMaterial.opacity,
+        hasMap: !!this.nailMaterial.map,
       });
     } catch (error) {
       console.error("Error loading nail texture:", error);
@@ -244,18 +268,31 @@ export class ThreeNailOverlay {
       this.nailTexture = null;
     }
 
-    // Remove texture from texture material
-    this.textureMaterial.map = null;
-    this.textureMaterial.needsUpdate = true;
+    // Remove texture from nail material
+    this.nailMaterial.map = null;
+    this.nailMaterial.needsUpdate = true;
 
-    // Remove all texture meshes from scene
+    // Restore original nail color and opacity
+    this.nailMaterial.color.setRGB(
+      this.config.nailColor.r / 255,
+      this.config.nailColor.g / 255,
+      this.config.nailColor.b / 255
+    );
+    this.nailMaterial.opacity = this.config.nailOpacity;
+
+    // Force all meshes to update their materials
+    this.nailMeshes.forEach((mesh) => {
+      mesh.material = this.nailMaterial;
+    });
+
+    // Clean up any remaining texture meshes (they shouldn't exist anymore)
     this.textureMeshes.forEach((mesh, key) => {
       this.scene.remove(mesh);
       mesh.geometry.dispose();
     });
     this.textureMeshes.clear();
 
-    console.log("Nail texture removed");
+    console.log("Nail texture removed from nail material, color restored");
   }
 
   public async setTexture(textureSource: string | null): Promise<void> {
@@ -285,7 +322,7 @@ export class ThreeNailOverlay {
       }
     });
 
-    // Remove old texture meshes
+    // Clean up any old texture meshes (shouldn't exist anymore but just in case)
     this.textureMeshes.forEach((mesh, key) => {
       if (!currentKeys.has(key)) {
         this.scene.remove(mesh);
@@ -294,13 +331,9 @@ export class ThreeNailOverlay {
       }
     });
 
-    // Update or create new meshes
+    // Update or create new nail meshes (texture is now part of the nail material)
     for (const match of matches) {
       this.updateNailMesh(match, scaleX, scaleY);
-      // Also update texture mesh if we have a texture
-      if (this.nailTexture) {
-        this.updateTextureMesh(match, scaleX, scaleY);
-      }
     }
 
     this.render();
@@ -351,100 +384,6 @@ export class ThreeNailOverlay {
 
     // --- ROTATION ---
     this.applyNailRotation(mesh, match);
-  }
-
-  private updateTextureMesh(
-    match: NailFingerMatch,
-    scaleX: number,
-    scaleY: number
-  ): void {
-    const key = `${match.handedness}_${match.fingertipIndex}`;
-    let textureMesh = this.textureMeshes.get(key);
-
-    const nailScaleFactor = 1.3; // Same as nail mesh
-    const width = match.nailWidth * scaleX * nailScaleFactor;
-    const length = match.nailHeight * scaleY * nailScaleFactor;
-
-    // Create texture mesh if it doesn't exist
-    if (!textureMesh) {
-      // Create a slightly curved plane geometry for the texture overlay
-      const textureGeometry = this.createTextureOverlayGeometry(width, length);
-      textureMesh = new THREE.Mesh(textureGeometry, this.textureMaterial);
-      this.textureMeshes.set(key, textureMesh);
-      this.scene.add(textureMesh);
-    } else if (
-      textureMesh.userData.width !== width ||
-      textureMesh.userData.length !== length
-    ) {
-      // Update geometry if size changed
-      textureMesh.geometry.dispose();
-      textureMesh.geometry = this.createTextureOverlayGeometry(width, length);
-    }
-
-    textureMesh.userData = { width, length };
-
-    // Position the texture mesh slightly above the nail surface
-    const threeX = match.nailCentroid[0] * scaleX - this.config.canvasWidth / 2;
-    const threeY =
-      -(match.nailCentroid[1] * scaleY) + this.config.canvasHeight / 2;
-    const offsetZ = 0.5; // Small offset to prevent z-fighting
-    textureMesh.position.set(threeX, threeY, offsetZ);
-
-    // Apply the same rotation as the nail
-    this.applyNailRotation(textureMesh, match);
-  }
-
-  private createTextureOverlayGeometry(
-    width: number,
-    length: number
-  ): THREE.BufferGeometry {
-    // Create a curved plane that matches the nail surface
-    const { nailCurvature } = this.config;
-    const geom = new THREE.PlaneGeometry(width * 0.9, length * 0.9, 10, 10); // Slightly smaller than nail
-    const positions = geom.attributes.position;
-    const curveAmount = width * nailCurvature * 0.4;
-
-    if (curveAmount > 0) {
-      for (let i = 0; i < positions.count; i++) {
-        const x = positions.getX(i);
-        const zOffset =
-          -curveAmount * (1.0 - Math.pow((x / (width * 0.9)) * 2, 2));
-        positions.setZ(i, zOffset);
-      }
-    }
-
-    geom.computeVertexNormals();
-    return geom;
-  }
-
-  private updateTextureMeshes(): void {
-    // Update all existing texture meshes when texture is loaded
-    this.nailMeshes.forEach((nailMesh, key) => {
-      if (nailMesh.userData.width && nailMesh.userData.length) {
-        // Create a texture mesh for this nail if we don't have one
-        if (!this.textureMeshes.has(key)) {
-          const width = nailMesh.userData.width;
-          const length = nailMesh.userData.length;
-          const textureGeometry = this.createTextureOverlayGeometry(
-            width,
-            length
-          );
-          const textureMesh = new THREE.Mesh(
-            textureGeometry,
-            this.textureMaterial
-          );
-
-          // Copy position and rotation from nail mesh
-          textureMesh.position.copy(nailMesh.position);
-          textureMesh.position.z += 0.5; // Small offset above nail
-          textureMesh.quaternion.copy(nailMesh.quaternion);
-
-          textureMesh.userData = { width, length };
-          this.textureMeshes.set(key, textureMesh);
-          this.scene.add(textureMesh);
-        }
-      }
-    });
   }
 
   private applyNailRotation(mesh: THREE.Mesh, match: NailFingerMatch): void {
@@ -546,7 +485,51 @@ export class ThreeNailOverlay {
     // Center the geometry on its bounding box, which is critical for proper rotation.
     geom.center();
 
+    // **FIX UV COORDINATES FOR TEXTURE MAPPING**
+    // ExtrudeGeometry's default UV mapping is complex and doesn't work well for nail textures
+    // We need to generate proper UV coordinates for the top face (where the texture should appear)
+    this.generateNailUVCoordinates(geom, width, length);
+
     return geom;
+  }
+
+  private generateNailUVCoordinates(
+    geometry: THREE.BufferGeometry,
+    width: number,
+    length: number
+  ): void {
+    const positionAttribute = geometry.attributes.position;
+    const uvArray: number[] = [];
+
+    // Get bounding box for normalization
+    geometry.computeBoundingBox();
+    const bbox = geometry.boundingBox!;
+
+    for (let i = 0; i < positionAttribute.count; i++) {
+      const x = positionAttribute.getX(i);
+      const z = positionAttribute.getZ(i);
+
+      // Normalize coordinates to [0, 1] range for UV mapping
+      // Map X coordinate (width) to U
+      const u = (x - bbox.min.x) / (bbox.max.x - bbox.min.x);
+      // Map Z coordinate (length) to V
+      const v = (z - bbox.min.z) / (bbox.max.z - bbox.min.z);
+
+      uvArray.push(u, v);
+    }
+
+    // Set the UV attribute
+    geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvArray, 2));
+
+    console.log("Generated UV coordinates for extruded nail geometry", {
+      vertexCount: positionAttribute.count,
+      uvCount: uvArray.length / 2,
+      bbox: {
+        x: [bbox.min.x, bbox.max.x],
+        y: [bbox.min.y, bbox.max.y],
+        z: [bbox.min.z, bbox.max.z],
+      },
+    });
   }
 
   private createCurvedPlaneGeometry(
