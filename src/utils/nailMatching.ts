@@ -2,42 +2,42 @@
  * Nail-Fingertip Matching and Orientation Analysis (REVISED)
  *
  * This module handles:
- * 1. Matching detected nails to specific fingertips
- * 2. Calculating a full 3D orientation basis (X, Y, Z axes) for each nail
- * 3. Calculating nail dimensions and 2D angle for drawing
- * 4. Preparing robust data for the 3D model overlay
+ * 1. Matching detected nails to specific fingertips using distance and confidence.
+ * 2. Calculating a full 3D orientation basis (X, Y, Z axes) for each nail.
+ * 3. Calculating nail dimensions (width, length) and 2D angle for drawing.
+ * 4. Preparing robust data for the 3D model overlay.
  */
 
 import { YoloDetection } from "./yolo";
 import { HandDetection } from "./mediapipe";
 import * as THREE from "three"; // Using THREE's Vector3 for convenience
 
-// The interface remains the same, but the 'orientation' data will be more stable.
 export interface NailFingerMatch {
   nailDetection: YoloDetection;
   fingertipIndex: number;
   fingertipPosition: [number, number];
   nailCentroid: [number, number];
-  nailWidth: number;
-  nailHeight: number;
+  nailWidth: number; // Across the finger
+  nailHeight: number; // Along the finger
   nailAngle: number;
   matchConfidence: number;
   handIndex: number;
   handedness: "Left" | "Right";
   orientation: {
-    xAxis: [number, number, number];
-    yAxis: [number, number, number];
-    zAxis: [number, number, number];
+    // A right-handed coordinate system for the nail
+    xAxis: [number, number, number]; // Points across the nail width
+    yAxis: [number, number, number]; // Points out from the nail surface (normal)
+    zAxis: [number, number, number]; // Points along the finger length
   };
 }
 
 // MediaPipe finger landmark indices, defined for clarity
 const FINGER_LANDMARKS = {
-  THUMB: { TIP: 4, DIP: 3, PIP: 2 },
-  INDEX: { TIP: 8, DIP: 7, PIP: 6 },
-  MIDDLE: { TIP: 12, DIP: 11, PIP: 10 },
-  RING: { TIP: 16, DIP: 15, PIP: 14 },
-  PINKY: { TIP: 20, DIP: 19, PIP: 18 },
+  THUMB: { TIP: 4, DIP: 3, PIP: 2, MCP: 1 },
+  INDEX: { TIP: 8, DIP: 7, PIP: 6, MCP: 5 },
+  MIDDLE: { TIP: 12, DIP: 11, PIP: 10, MCP: 9 },
+  RING: { TIP: 16, DIP: 15, PIP: 14, MCP: 13 },
+  PINKY: { TIP: 20, DIP: 19, PIP: 18, MCP: 17 },
 };
 
 const FINGER_TIPS = [4, 8, 12, 16, 20];
@@ -61,31 +61,29 @@ function getFingerLandmarkIndices(tipIndex: number) {
 }
 
 /**
- * Calculate the centroid of a nail detection
+ * Calculate the centroid of a nail detection mask for accurate positioning.
  */
 function calculateNailCentroid(detection: YoloDetection): [number, number] {
   if (detection.maskPolygon && detection.maskPolygon.length > 0) {
-    const sumX = detection.maskPolygon.reduce(
-      (sum, point) => sum + point[0],
-      0
-    );
-    const sumY = detection.maskPolygon.reduce(
-      (sum, point) => sum + point[1],
-      0
-    );
+    let sumX = 0;
+    let sumY = 0;
+    for (const point of detection.maskPolygon) {
+      sumX += point[0];
+      sumY += point[1];
+    }
     return [
       sumX / detection.maskPolygon.length,
       sumY / detection.maskPolygon.length,
     ];
-  } else {
-    const [x, y, width, height] = detection.bbox;
-    return [x + width / 2, y + height / 2];
   }
+  // Fallback to the center of the bounding box
+  const [x, y, width, height] = detection.bbox;
+  return [x + width / 2, y + height / 2];
 }
 
 /**
- * FIXED: This is the new core logic for calculating a stable 3D orientation basis.
- * It uses the hand's own geometry to avoid issues with world axes.
+ * FIXED: This is the core logic for calculating a stable 3D orientation basis.
+ * It uses the hand's own geometry to create a robust coordinate system for the nail.
  */
 function calculateOrientationBasis(
   hand: HandDetection,
@@ -96,36 +94,43 @@ function calculateOrientationBasis(
   if (!indices) return null;
 
   const { TIP, DIP, PIP } = indices;
-  if ([TIP, DIP, PIP].some((i) => i >= lm.length)) return null;
+  // Safety check: ensure all required landmark points exist.
+  if ([TIP, DIP, PIP].some((i) => !lm[i])) return null;
 
-  // Create vectors from the landmarks
+  // Create THREE.Vector3 instances from landmark coordinates.
   const p_tip = new THREE.Vector3(lm[TIP].x, lm[TIP].y, lm[TIP].z);
   const p_dip = new THREE.Vector3(lm[DIP].x, lm[DIP].y, lm[DIP].z);
   const p_pip = new THREE.Vector3(lm[PIP].x, lm[PIP].y, lm[PIP].z);
 
-  // Define two vectors on the plane of the back of the finger
-  const v1 = p_dip.clone().sub(p_pip); // Vector from PIP to DIP
-  const v2 = p_tip.clone().sub(p_dip); // Vector from DIP to TIP
+  // --- Determine the 3D axes of the nail ---
 
-  // The cross product gives us the normal vector to the finger's surface (Y-axis)
-  // This is the key to fixing the "upside down" problem.
-  let yAxis = new THREE.Vector3().crossVectors(v1, v2).normalize();
+  // 1. The z-axis (length) points along the finger's direction.
+  //    We use the vector from the second joint (PIP) to the tip for a stable direction.
+  const zAxis = p_tip.clone().sub(p_pip).normalize();
 
-  // The direction of the cross product depends on the "winding" of the points.
-  // For MediaPipe's landmark ordering, a Left hand will have an inverted normal.
-  // We correct this using the provided handedness info.
+  // 2. The y-axis (normal) points "out" from the nail surface.
+  //    We find it using the cross product of two vectors along the finger's surface.
+  const v_pip_dip = p_dip.clone().sub(p_pip);
+  const v_dip_tip = p_tip.clone().sub(p_dip);
+  const yAxis = new THREE.Vector3()
+    .crossVectors(v_pip_dip, v_dip_tip)
+    .normalize();
+
+  // MediaPipe's landmark winding order is consistent. For a left hand, this
+  // results in a normal vector pointing "into" the finger. We must negate it
+  // to ensure the normal always points "out", away from the nail bed.
   if (hand.handedness === "Left") {
     yAxis.negate();
   }
 
-  // The direction of the finger (Z-axis) can be taken from PIP to TIP
-  let zAxis = p_tip.clone().sub(p_pip).normalize();
+  // 3. The x-axis (width) is perpendicular to both the normal and length axes.
+  //    We find it with another cross product to form a right-handed coordinate system.
+  const xAxis = new THREE.Vector3().crossVectors(yAxis, zAxis).normalize();
 
-  // We create the third axis (X-axis) using another cross product to ensure orthogonality.
-  let xAxis = new THREE.Vector3().crossVectors(yAxis, zAxis).normalize();
-
-  // Re-calculate the Z-axis to make the basis perfectly orthogonal (Gram-Schmidt process)
-  zAxis = new THREE.Vector3().crossVectors(xAxis, yAxis).normalize();
+  // To ensure the basis is perfectly orthogonal (in case the landmarks are not
+  // perfectly co-planar), we re-calculate the z-axis from the new x and y axes.
+  // This is a simplified Gram-Schmidt orthogonalization process.
+  zAxis.crossVectors(xAxis, yAxis).normalize();
 
   return {
     xAxis: xAxis.toArray() as [number, number, number],
@@ -134,50 +139,58 @@ function calculateOrientationBasis(
   };
 }
 
+/**
+ * Calculates the nail's width and length by projecting its mask points onto the orientation axes.
+ */
 function calculateNailDimensions(
   detection: YoloDetection,
-  zAxis: [number, number, number]
+  orientation: NailFingerMatch["orientation"]
 ): { width: number; height: number; angle: number } {
-  const fingerDirection2D = new THREE.Vector2(zAxis[0], zAxis[1]).normalize();
-  const angle = Math.atan2(fingerDirection2D.y, fingerDirection2D.x);
-  const perpDirection2D = new THREE.Vector2(
-    -fingerDirection2D.y,
-    fingerDirection2D.x
-  );
+  const zAxis2D = new THREE.Vector2(
+    orientation.zAxis[0],
+    orientation.zAxis[1]
+  ).normalize();
+  const xAxis2D = new THREE.Vector2(
+    orientation.xAxis[0],
+    orientation.xAxis[1]
+  ).normalize();
+  const angle = Math.atan2(zAxis2D.y, zAxis2D.x); // Angle for 2D drawing
 
   if (detection.maskPolygon && detection.maskPolygon.length > 4) {
     const polygon = detection.maskPolygon;
     const centroid = calculateNailCentroid(detection);
     const centroidV2 = new THREE.Vector2(centroid[0], centroid[1]);
 
-    let minLong = Infinity,
-      maxLong = -Infinity;
-    let minTrans = Infinity,
-      maxTrans = -Infinity;
+    let minLength = Infinity,
+      maxLength = -Infinity;
+    let minWidth = Infinity,
+      maxWidth = -Infinity;
 
-    polygon.forEach((p) => {
+    for (const p of polygon) {
       const pointV2 = new THREE.Vector2(p[0], p[1]);
       const d = pointV2.sub(centroidV2);
 
-      minLong = Math.min(minLong, d.dot(fingerDirection2D));
-      maxLong = Math.max(maxLong, d.dot(fingerDirection2D));
-      minTrans = Math.min(minTrans, d.dot(perpDirection2D));
-      maxTrans = Math.max(maxTrans, d.dot(perpDirection2D));
-    });
+      // Project point onto the length and width axes
+      minLength = Math.min(minLength, d.dot(zAxis2D));
+      maxLength = Math.max(maxLength, d.dot(zAxis2D));
+      minWidth = Math.min(minWidth, d.dot(xAxis2D));
+      maxWidth = Math.max(maxWidth, d.dot(xAxis2D));
+    }
 
     return {
-      height: maxLong - minLong, // Length along the finger
-      width: maxTrans - minTrans, // Width across the finger
-      angle,
-    };
-  } else {
-    const [, , bboxWidth, bboxHeight] = detection.bbox;
-    return {
-      height: Math.max(bboxWidth, bboxHeight),
-      width: Math.min(bboxWidth, bboxHeight),
+      height: maxLength - minLength, // Total length along the finger
+      width: maxWidth - minWidth, // Total width across the finger
       angle,
     };
   }
+
+  // Fallback using the bounding box if mask isn't available
+  const [, , bboxWidth, bboxHeight] = detection.bbox;
+  return {
+    height: Math.max(bboxWidth, bboxHeight), // Approximate length
+    width: Math.min(bboxWidth, bboxHeight), // Approximate width
+    angle,
+  };
 }
 
 function distanceBetweenPoints(
@@ -189,6 +202,9 @@ function distanceBetweenPoints(
   return Math.sqrt(dx * dx + dy * dy);
 }
 
+/**
+ * Main function to match nail detections to hand landmarks.
+ */
 export function matchNailsToFingertips(
   nailDetections: YoloDetection[],
   handDetections: HandDetection[],
@@ -199,84 +215,80 @@ export function matchNailsToFingertips(
     return [];
   }
 
-  const matches: NailFingerMatch[] = [];
-  const maxDistance = Math.min(frameWidth, frameHeight) * 0.15;
+  const potentialMatches: (NailFingerMatch & { matchScore: number })[] = [];
+  const maxDistance = Math.min(frameWidth, frameHeight) * 0.15; // Max search radius
 
-  handDetections.forEach((hand, handIndex) => {
-    FINGER_TIPS.forEach((tipIndex) => {
-      if (tipIndex >= hand.landmarks.length) return;
+  // Find all possible matches between nails and fingertips
+  for (const detection of nailDetections) {
+    const nailCentroid = calculateNailCentroid(detection);
 
-      const fingertip = hand.landmarks[tipIndex];
-      const fingertipPos: [number, number] = [
-        fingertip.x * frameWidth,
-        fingertip.y * frameHeight,
-      ];
+    for (const [handIndex, hand] of handDetections.entries()) {
+      for (const tipIndex of FINGER_TIPS) {
+        if (!hand.landmarks[tipIndex]) continue;
 
-      let bestMatch: { detection: YoloDetection; confidence: number } | null =
-        null;
+        const fingertip = hand.landmarks[tipIndex];
+        const fingertipPos: [number, number] = [
+          fingertip.x * frameWidth,
+          fingertip.y * frameHeight,
+        ];
 
-      nailDetections.forEach((detection) => {
-        const nailCentroid = calculateNailCentroid(detection);
         const dist = distanceBetweenPoints(fingertipPos, nailCentroid);
 
         if (dist < maxDistance) {
-          const distanceScore = Math.max(0, 1 - dist / maxDistance);
-          const detectionScore = detection.score;
-          const confidence = distanceScore * 0.6 + detectionScore * 0.4;
+          const orientation = calculateOrientationBasis(hand, tipIndex);
+          if (!orientation) continue;
 
-          if (!bestMatch || confidence > bestMatch.confidence) {
-            bestMatch = { detection, confidence };
-          }
+          const nailDimensions = calculateNailDimensions(
+            detection,
+            orientation
+          );
+          const distanceScore = 1 - dist / maxDistance;
+          const matchScore = distanceScore * 0.7 + detection.score * 0.3;
+
+          potentialMatches.push({
+            nailDetection: detection,
+            fingertipIndex: tipIndex,
+            fingertipPosition: fingertipPos,
+            nailCentroid,
+            nailWidth: nailDimensions.width,
+            nailHeight: nailDimensions.height,
+            nailAngle: nailDimensions.angle,
+            matchConfidence: detection.score, // Use raw detection confidence for display
+            matchScore, // Internal score for finding the best match
+            handIndex,
+            handedness: hand.handedness as "Left" | "Right",
+            orientation,
+          });
         }
-      });
-
-      if (bestMatch && bestMatch.confidence > 0.4) {
-        // Use the new, robust orientation calculation
-        const orientation = calculateOrientationBasis(hand, tipIndex);
-        if (!orientation) return;
-
-        const nailCentroid = calculateNailCentroid(bestMatch.detection);
-        const nailDimensions = calculateNailDimensions(
-          bestMatch.detection,
-          orientation.zAxis
-        );
-
-        matches.push({
-          nailDetection: bestMatch.detection,
-          fingertipIndex: tipIndex,
-          fingertipPosition: fingertipPos,
-          nailCentroid,
-          nailWidth: nailDimensions.width,
-          nailHeight: nailDimensions.height,
-          nailAngle: nailDimensions.angle,
-          matchConfidence: bestMatch.confidence,
-          handIndex: handIndex,
-          handedness: hand.handedness as "Left" | "Right",
-          orientation: orientation,
-        });
       }
-    });
-  });
+    }
+  }
 
-  // Deduplication to ensure each nail and finger is used only once
-  const uniqueMatches: NailFingerMatch[] = [];
-  const usedNails = new Set<YoloDetection>();
-  const usedFingers = new Set<string>();
+  // Deduplication: Ensure each nail and each finger is used only once.
+  // We sort by the match score so the most likely pairs are chosen first.
+  potentialMatches.sort((a, b) => b.matchScore - a.matchScore);
 
-  matches
-    .sort((a, b) => b.matchConfidence - a.matchConfidence)
-    .forEach((match) => {
-      const fingerKey = `${match.handIndex}-${match.fingertipIndex}`;
-      if (!usedNails.has(match.nailDetection) && !usedFingers.has(fingerKey)) {
-        uniqueMatches.push(match);
-        usedNails.add(match.nailDetection);
-        usedFingers.add(fingerKey);
-      }
-    });
+  const finalMatches: NailFingerMatch[] = [];
+  const usedNailIndices = new Set<number>();
+  const usedFingerKeys = new Set<string>();
 
-  return uniqueMatches;
+  for (const match of potentialMatches) {
+    const nailIndex = nailDetections.indexOf(match.nailDetection);
+    const fingerKey = `${match.handIndex}-${match.fingertipIndex}`;
+
+    if (!usedNailIndices.has(nailIndex) && !usedFingerKeys.has(fingerKey)) {
+      finalMatches.push(match);
+      usedNailIndices.add(nailIndex);
+      usedFingerKeys.add(fingerKey);
+    }
+  }
+
+  return finalMatches;
 }
 
+/**
+ * Draws debugging visuals for the nail-finger matches on a 2D canvas.
+ */
 export function drawNailFingerMatches(
   ctx: CanvasRenderingContext2D,
   matches: NailFingerMatch[],
@@ -293,6 +305,7 @@ export function drawNailFingerMatches(
       match.fingertipPosition[1] * scaleY,
     ];
 
+    // Draw connecting line
     ctx.strokeStyle = "#00ff88";
     ctx.lineWidth = 2;
     ctx.setLineDash([8, 4]);
@@ -302,22 +315,26 @@ export function drawNailFingerMatches(
     ctx.stroke();
     ctx.setLineDash([]);
 
+    // Draw dot on nail centroid
     ctx.fillStyle = "#00ff88";
     ctx.beginPath();
     ctx.arc(scaledCentroid[0], scaledCentroid[1], 4, 0, 2 * Math.PI);
     ctx.fill();
 
+    // Draw label
     const fingerName =
       FINGER_NAMES[FINGER_TIPS.indexOf(match.fingertipIndex)] || "Unknown";
     const label = `${match.handedness} ${fingerName} (${(
       match.matchConfidence * 100
     ).toFixed(0)}%)`;
     ctx.font = "bold 12px Arial";
-    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    const textWidth = ctx.measureText(label).width;
+
+    ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
     ctx.fillRect(
       scaledFingertip[0] + 10,
       scaledFingertip[1] - 20,
-      ctx.measureText(label).width + 8,
+      textWidth + 8,
       18
     );
     ctx.fillStyle = "#ffffff";
