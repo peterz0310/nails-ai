@@ -89,6 +89,12 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   const threeOverlayRef = useRef<ThreeNailOverlay | null>(null);
   const threeContainerRef = useRef<HTMLDivElement>(null);
 
+  // Track canvas dimensions for 3D overlay
+  const [overlayCanvasDimensions, setOverlayCanvasDimensions] = useState({
+    width: 0,
+    height: 0,
+  });
+
   // Add smoothing for nail orientations to reduce jitter
   const nailOrientationHistoryRef = useRef<Map<string, number[]>>(new Map());
   const smoothingWindowSize = 5; // Number of frames to average
@@ -766,10 +772,14 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     if (show3DOverlay && threeOverlayRef.current && detectionMode === "both") {
       // Update canvas size if needed
       if (
-        canvas.width !== threeOverlayRef.current.getConfig().canvasWidth ||
-        canvas.height !== threeOverlayRef.current.getConfig().canvasHeight
+        canvas.width !== overlayCanvasDimensions.width ||
+        canvas.height !== overlayCanvasDimensions.height
       ) {
         threeOverlayRef.current.resize(canvas.width, canvas.height);
+        setOverlayCanvasDimensions({
+          width: canvas.width,
+          height: canvas.height,
+        });
       }
 
       // Update 3D nail overlays with current matches
@@ -954,21 +964,23 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
         const config: ThreeNailOverlayConfig = {
           canvasWidth: canvas.width,
           canvasHeight: canvas.height,
-          videoWidth: videoRef.current?.videoWidth || 640,
-          videoHeight: videoRef.current?.videoHeight || 640,
           enableLighting: true,
           nailThickness: nail3DThickness,
           nailOpacity: nail3DOpacity,
           showWireframe: show3DWireframe,
           metallicIntensity: nail3DMetallic,
           roughness: nail3DRoughness,
-          enableReflections: enable3DReflections,
           enable3DRotation: enable3DRotation,
           nailCurvature: nail3DCurvature,
+          nailColor: { r: 255, g: 107, b: 157 }, // Default pink color
         };
 
         try {
           threeOverlayRef.current = new ThreeNailOverlay(container, config);
+          setOverlayCanvasDimensions({
+            width: canvas.width,
+            height: canvas.height,
+          });
           console.log("3D nail overlay initialized successfully");
         } catch (error) {
           console.error("Failed to initialize 3D overlay:", error);
@@ -994,24 +1006,40 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     nail3DCurvature,
   ]);
 
+  // Helper function to update 3D overlay configuration
+  const updateThreeOverlayConfig = useCallback(() => {
+    if (threeOverlayRef.current && canvasRef.current) {
+      const config: ThreeNailOverlayConfig = {
+        canvasWidth: overlayCanvasDimensions.width || canvasRef.current.width,
+        canvasHeight:
+          overlayCanvasDimensions.height || canvasRef.current.height,
+        enableLighting: true,
+        nailThickness: nail3DThickness,
+        nailOpacity: nail3DOpacity,
+        showWireframe: show3DWireframe,
+        metallicIntensity: nail3DMetallic,
+        roughness: nail3DRoughness,
+        enable3DRotation: enable3DRotation,
+        nailCurvature: nail3DCurvature,
+        nailColor: { r: 255, g: 107, b: 157 }, // Default pink color
+      };
+      threeOverlayRef.current.updateConfig(config);
+    }
+  }, [
+    overlayCanvasDimensions,
+    nail3DThickness,
+    nail3DOpacity,
+    show3DWireframe,
+    nail3DMetallic,
+    nail3DRoughness,
+    enable3DRotation,
+    nail3DCurvature,
+  ]);
+
   // Handle 3D overlay setting changes
   useEffect(() => {
-    if (threeOverlayRef.current) {
-      threeOverlayRef.current.setWireframeMode(show3DWireframe);
-    }
-  }, [show3DWireframe]);
-
-  useEffect(() => {
-    if (threeOverlayRef.current) {
-      threeOverlayRef.current.setOpacity(nail3DOpacity);
-    }
-  }, [nail3DOpacity]);
-
-  useEffect(() => {
-    if (threeOverlayRef.current) {
-      threeOverlayRef.current.setNailThickness(nail3DThickness);
-    }
-  }, [nail3DThickness]);
+    updateThreeOverlayConfig();
+  }, [updateThreeOverlayConfig]);
 
   return (
     <div className="w-full max-w-4xl">
@@ -1357,11 +1385,6 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                 <button
                   onClick={() => {
                     setShow3DWireframe(!show3DWireframe);
-                    if (threeOverlayRef.current) {
-                      threeOverlayRef.current.setWireframeMode(
-                        !show3DWireframe
-                      );
-                    }
                   }}
                   className={`px-3 py-2 rounded-lg font-medium transition-colors ${
                     show3DWireframe
@@ -1388,9 +1411,6 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                       onChange={(e) => {
                         const newOpacity = parseFloat(e.target.value);
                         setNail3DOpacity(newOpacity);
-                        if (threeOverlayRef.current) {
-                          threeOverlayRef.current.setOpacity(newOpacity);
-                        }
                       }}
                       className="w-16"
                     />
@@ -1411,11 +1431,6 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                       onChange={(e) => {
                         const newThickness = parseInt(e.target.value);
                         setNail3DThickness(newThickness);
-                        if (threeOverlayRef.current) {
-                          threeOverlayRef.current.setNailThickness(
-                            newThickness
-                          );
-                        }
                       }}
                       className="w-16"
                     />
@@ -1436,11 +1451,6 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                       onChange={(e) => {
                         const newMetallic = parseFloat(e.target.value);
                         setNail3DMetallic(newMetallic);
-                        if (threeOverlayRef.current) {
-                          threeOverlayRef.current.setMetallicIntensity(
-                            newMetallic
-                          );
-                        }
                       }}
                       className="w-16"
                     />
@@ -1461,9 +1471,6 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                       onChange={(e) => {
                         const newRoughness = parseFloat(e.target.value);
                         setNail3DRoughness(newRoughness);
-                        if (threeOverlayRef.current) {
-                          threeOverlayRef.current.setRoughness(newRoughness);
-                        }
                       }}
                       className="w-16"
                     />
@@ -1484,11 +1491,6 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                       onChange={(e) => {
                         const newCurvature = parseFloat(e.target.value);
                         setNail3DCurvature(newCurvature);
-                        if (threeOverlayRef.current) {
-                          threeOverlayRef.current.setNailCurvature(
-                            newCurvature
-                          );
-                        }
                       }}
                       className="w-16"
                     />
@@ -1505,11 +1507,6 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                         checked={enable3DRotation}
                         onChange={(e) => {
                           setEnable3DRotation(e.target.checked);
-                          if (threeOverlayRef.current) {
-                            threeOverlayRef.current.set3DRotationEnabled(
-                              e.target.checked
-                            );
-                          }
                         }}
                         className="rounded text-cyan-500 focus:ring-cyan-500 focus:ring-1"
                       />
@@ -1522,11 +1519,6 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                         checked={enable3DReflections}
                         onChange={(e) => {
                           setEnable3DReflections(e.target.checked);
-                          if (threeOverlayRef.current) {
-                            threeOverlayRef.current.setReflectionsEnabled(
-                              e.target.checked
-                            );
-                          }
                         }}
                         className="rounded text-cyan-500 focus:ring-cyan-500 focus:ring-1"
                       />
