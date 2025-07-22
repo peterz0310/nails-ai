@@ -27,6 +27,16 @@ export interface ThreeNailOverlayConfig {
   enable3DRotation: boolean;
   nailCurvature: number; // 0=flat, 1=very curved
   nailColor: { r: number; g: number; b: number };
+  // Debug rotation controls
+  rotationDebugMode?: boolean;
+  debugAxisMappingX?: "threeX" | "threeY" | "threeZ";
+  debugAxisMappingY?: "threeX" | "threeY" | "threeZ";
+  debugAxisMappingZ?: "threeX" | "threeY" | "threeZ";
+  preRotationX?: number;
+  preRotationY?: number;
+  preRotationZ?: number;
+  // Mirror correction for camera feed
+  debugMirrorCorrection?: boolean;
 }
 
 export class ThreeNailOverlay {
@@ -199,27 +209,69 @@ export class ThreeNailOverlay {
 
   private applyNailRotation(mesh: THREE.Mesh, match: NailFingerMatch): void {
     if (this.config.enable3DRotation && match.orientation) {
-      const { xAxis, yAxis, zAxis } = match.orientation;
+      let { xAxis, yAxis, zAxis } = match.orientation;
 
       // **FIX:** The orientation vectors from `nailMatching` are now pre-converted
       // into a right-handed, Y-up coordinate system suitable for Three.js.
       // No further conversion is needed here.
-      const threeX = new THREE.Vector3().fromArray(xAxis); // Width
-      const threeY = new THREE.Vector3().fromArray(yAxis); // Normal
-      const threeZ = new THREE.Vector3().fromArray(zAxis); // Length
+      let threeX = new THREE.Vector3().fromArray(xAxis); // Width
+      let threeY = new THREE.Vector3().fromArray(yAxis); // Normal
+      let threeZ = new THREE.Vector3().fromArray(zAxis); // Length
 
-      // Our Extruded Geometry is created with:
-      // - Local X: Width
-      // - Local Y: Thickness/Normal direction
-      // - Local Z: Length
-      // We map these local axes to our calculated world-space axes.
-      const rotationMatrix = new THREE.Matrix4().makeBasis(
-        threeX, // Map Local X to World X (Width)
-        threeY, // Map Local Y to World Y (Normal)
-        threeZ // Map Local Z to World Z (Length)
-      );
+      // **MIRROR CORRECTION:** Handle coordinate system handedness from mirrored camera
+      if (this.config.debugMirrorCorrection) {
+        // When camera is mirrored, we need to flip the X-axis to convert from
+        // left-handed (mirrored camera) to right-handed (Three.js) coordinate system
+        threeX.negate();
+        // Also negate Z-axis to maintain proper handedness
+        threeZ.negate();
+      }
 
-      mesh.quaternion.setFromRotationMatrix(rotationMatrix);
+      if (this.config.rotationDebugMode) {
+        // **DEBUG MODE:** Use manual axis mapping and pre-rotations
+        const axisMap = {
+          threeX,
+          threeY,
+          threeZ,
+        };
+
+        // Apply manual axis mapping
+        const mappedX = axisMap[this.config.debugAxisMappingX || "threeX"];
+        const mappedY = axisMap[this.config.debugAxisMappingY || "threeZ"];
+        const mappedZ = axisMap[this.config.debugAxisMappingZ || "threeY"];
+
+        const rotationMatrix = new THREE.Matrix4().makeBasis(
+          mappedX, // Map Local X to chosen world axis
+          mappedY, // Map Local Y to chosen world axis
+          mappedZ // Map Local Z to chosen world axis
+        );
+
+        mesh.quaternion.setFromRotationMatrix(rotationMatrix);
+
+        // Apply additional pre-rotation for debugging
+        const preRotation = new THREE.Euler(
+          this.config.preRotationX || 0,
+          this.config.preRotationY || 0,
+          this.config.preRotationZ || 0
+        );
+        const preQuaternion = new THREE.Quaternion().setFromEuler(preRotation);
+        mesh.quaternion.premultiply(preQuaternion);
+      } else {
+        // **ORIGINAL LOGIC:** Use the fixed mapping
+        // After rotating the ExtrudeGeometry -90° around X, our geometry now has:
+        // - Local X: Width (across nail)
+        // - Local Y: Length (along finger, was Z before rotation)
+        // - Local Z: Thickness/Normal (pointing out from nail surface, was Y before rotation)
+        //
+        // Map to world axes:
+        const rotationMatrix = new THREE.Matrix4().makeBasis(
+          threeX, // Map Local X to World X (Width)
+          threeZ, // Map Local Y to World Z (Length)
+          threeY // Map Local Z to World Y (Normal)
+        );
+
+        mesh.quaternion.setFromRotationMatrix(rotationMatrix);
+      }
     } else {
       // Fallback to simple 2D rotation
       // Reset 3D rotation and apply only 2D rotation around the screen's Z-axis.
@@ -280,6 +332,23 @@ export class ThreeNailOverlay {
     };
 
     const geom = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+
+    if (!this.config.rotationDebugMode) {
+      // **ORIGINAL:** Apply the -90° X rotation when not in debug mode
+      // ExtrudeGeometry creates geometry with:
+      // - X: width (correct for nail width)
+      // - Y: curvature/thickness (normal direction, pointing up from nail surface)
+      // - Z: length (extrusion depth along finger length)
+      //
+      // We want the nail to lie flat by default, with:
+      // - X: width (across nail)
+      // - Y: length (along finger)
+      // - Z: thickness (normal from surface)
+      //
+      // So we rotate the extruded geometry 90 degrees around X axis
+      geom.rotateX(-Math.PI / 2);
+    }
+
     // Center the geometry on its bounding box, which is critical for proper rotation.
     geom.center();
     return geom;

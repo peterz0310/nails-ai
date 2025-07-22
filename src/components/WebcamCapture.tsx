@@ -97,6 +97,23 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   const nail3DCurvature = 0.6;
   const enable3DRotation = true; // Always enabled
   const enable3DReflections = true;
+
+  // Rotation debug controls
+  const [rotationDebugMode, setRotationDebugMode] = useState(false);
+  const [debugAxisMappingX, setDebugAxisMappingX] = useState<
+    "threeX" | "threeY" | "threeZ"
+  >("threeZ"); // Set to Z based on user findings: X→Z
+  const [debugAxisMappingY, setDebugAxisMappingY] = useState<
+    "threeX" | "threeY" | "threeZ"
+  >("threeX"); // Set to X based on user findings: Y→X
+  const [debugAxisMappingZ, setDebugAxisMappingZ] = useState<
+    "threeX" | "threeY" | "threeZ"
+  >("threeY"); // Set to Y based on user findings: Z→Y
+  const [preRotationX, setPreRotationX] = useState(0); // Start at 0 for clean debugging
+  const [preRotationY, setPreRotationY] = useState(0); // Start at 0 for clean debugging
+  const [preRotationZ, setPreRotationZ] = useState(0); // Start at 0 for clean debugging
+  const [debugMirrorCorrection, setDebugMirrorCorrection] = useState(false); // Mirror correction for camera handedness
+
   const threeOverlayRef = useRef<ThreeNailOverlay | null>(null);
   const threeContainerRef = useRef<HTMLDivElement>(null);
 
@@ -872,6 +889,14 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
           enable3DRotation: enable3DRotation,
           nailCurvature: nail3DCurvature,
           nailColor: { r: 255, g: 107, b: 157 }, // Default pink color
+          // Debug rotation controls
+          rotationDebugMode,
+          debugAxisMappingX,
+          debugAxisMappingY,
+          debugAxisMappingZ,
+          preRotationX,
+          preRotationY,
+          preRotationZ,
         };
 
         try {
@@ -903,6 +928,13 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     enable3DReflections,
     enable3DRotation,
     nail3DCurvature,
+    rotationDebugMode,
+    debugAxisMappingX,
+    debugAxisMappingY,
+    debugAxisMappingZ,
+    preRotationX,
+    preRotationY,
+    preRotationZ,
   ]);
 
   // Helper function to update 3D overlay configuration
@@ -921,6 +953,15 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
         enable3DRotation: enable3DRotation,
         nailCurvature: nail3DCurvature,
         nailColor: { r: 255, g: 107, b: 157 }, // Default pink color
+        // Debug rotation controls
+        rotationDebugMode,
+        debugAxisMappingX,
+        debugAxisMappingY,
+        debugAxisMappingZ,
+        preRotationX,
+        preRotationY,
+        preRotationZ,
+        debugMirrorCorrection,
       };
       threeOverlayRef.current.updateConfig(config);
     }
@@ -933,6 +974,14 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     nail3DRoughness,
     enable3DRotation,
     nail3DCurvature,
+    rotationDebugMode,
+    debugAxisMappingX,
+    debugAxisMappingY,
+    debugAxisMappingZ,
+    preRotationX,
+    preRotationY,
+    preRotationZ,
+    debugMirrorCorrection,
   ]);
 
   // Handle 3D overlay setting changes
@@ -1233,7 +1282,168 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
             >
               {show3DWireframe ? "📐 Wireframe" : "🎯 Solid"}
             </button>
+
+            {/* Rotation Debug Toggle */}
+            <button
+              onClick={() => {
+                setRotationDebugMode(!rotationDebugMode);
+              }}
+              className={`px-3 py-2 rounded-lg font-medium transition-colors ${
+                rotationDebugMode
+                  ? "bg-white border-2 border-red-500 text-red-700"
+                  : "bg-red-100 text-red-700 hover:bg-red-200"
+              }`}
+            >
+              {rotationDebugMode ? "🔧 Debug ON" : "🔧 Debug"}
+            </button>
           </div>
+
+          {/* Debug Rotation Controls */}
+          {rotationDebugMode && (
+            <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+              <h3 className="text-sm font-bold text-red-800 mb-3">
+                🔧 Nail Rotation Debug Controls
+              </h3>
+
+              {/* Axis Mapping */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                <div>
+                  <label className="block text-xs font-medium text-red-700 mb-1">
+                    Local X → World:
+                  </label>
+                  <select
+                    value={debugAxisMappingX}
+                    onChange={(e) =>
+                      setDebugAxisMappingX(e.target.value as any)
+                    }
+                    className="w-full text-xs border border-red-300 rounded px-2 py-1 text-black"
+                  >
+                    <option value="threeX">threeX (Width)</option>
+                    <option value="threeY">threeY (Normal)</option>
+                    <option value="threeZ">threeZ (Length)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-red-700 mb-1">
+                    Local Y → World:
+                  </label>
+                  <select
+                    value={debugAxisMappingY}
+                    onChange={(e) =>
+                      setDebugAxisMappingY(e.target.value as any)
+                    }
+                    className="w-full text-xs border border-red-300 rounded px-2 py-1 text-black"
+                  >
+                    <option value="threeX">threeX (Width)</option>
+                    <option value="threeY">threeY (Normal)</option>
+                    <option value="threeZ">threeZ (Length)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-red-700 mb-1">
+                    Local Z → World:
+                  </label>
+                  <select
+                    value={debugAxisMappingZ}
+                    onChange={(e) =>
+                      setDebugAxisMappingZ(e.target.value as any)
+                    }
+                    className="w-full text-xs border border-red-300 rounded px-2 py-1 text-black"
+                  >
+                    <option value="threeX">threeX (Width)</option>
+                    <option value="threeY">threeY (Normal)</option>
+                    <option value="threeZ">threeZ (Length)</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Mirror Correction Toggle */}
+              <div className="mb-4">
+                <label className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={debugMirrorCorrection}
+                    onChange={(e) => setDebugMirrorCorrection(e.target.checked)}
+                    className="rounded text-red-500 focus:ring-red-500 focus:ring-1"
+                  />
+                  <span className="font-medium text-red-700">
+                    🪞 Mirror Correction (Fix Camera Handedness)
+                  </span>
+                </label>
+                <div className="text-xs text-red-600 mt-1 ml-5">
+                  Turn this ON if nails look correct horizontally but wrong when
+                  fingers point up/down. This fixes the left-handed coordinate
+                  system from mirrored camera feed.
+                </div>
+              </div>
+
+              {/* Pre-Rotation Controls */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-xs font-medium text-red-700 mb-1">
+                    Pre-Rotate X: {((preRotationX * 180) / Math.PI).toFixed(0)}°
+                  </label>
+                  <input
+                    type="range"
+                    min={-Math.PI}
+                    max={Math.PI}
+                    step={Math.PI / 18}
+                    value={preRotationX}
+                    onChange={(e) =>
+                      setPreRotationX(parseFloat(e.target.value))
+                    }
+                    className="w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-red-700 mb-1">
+                    Pre-Rotate Y: {((preRotationY * 180) / Math.PI).toFixed(0)}°
+                  </label>
+                  <input
+                    type="range"
+                    min={-Math.PI}
+                    max={Math.PI}
+                    step={Math.PI / 18}
+                    value={preRotationY}
+                    onChange={(e) =>
+                      setPreRotationY(parseFloat(e.target.value))
+                    }
+                    className="w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-red-700 mb-1">
+                    Pre-Rotate Z: {((preRotationZ * 180) / Math.PI).toFixed(0)}°
+                  </label>
+                  <input
+                    type="range"
+                    min={-Math.PI}
+                    max={Math.PI}
+                    step={Math.PI / 18}
+                    value={preRotationZ}
+                    onChange={(e) =>
+                      setPreRotationZ(parseFloat(e.target.value))
+                    }
+                    className="w-full"
+                  />
+                </div>
+              </div>
+
+              <div className="mt-3 text-xs text-red-600">
+                <strong>Current Status:</strong> X→Z, Y→X, Z→Y mapping is loaded
+                (your best finding). Now test:
+                <br />
+                <strong>1.</strong> Turn ON 🪞 Mirror Correction if nails look
+                wrong when fingers point vertically
+                <br />
+                <strong>2.</strong> Use sliders only for fine-tuning after
+                mirror correction
+                <br />
+                <strong>Goal:</strong> Nails should lay flat on fingertips in
+                all orientations
+              </div>
+            </div>
+          )}
 
           {isProcessing && (
             <div className="flex items-center gap-2 text-pink-600">
