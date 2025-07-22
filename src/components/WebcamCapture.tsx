@@ -114,6 +114,12 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   const [preRotationZ, setPreRotationZ] = useState(0); // Start at 0 for clean debugging
   const [debugMirrorCorrection, setDebugMirrorCorrection] = useState(false); // Mirror correction for camera handedness
 
+  // Nail texture upload state
+  const [uploadedTexture, setUploadedTexture] = useState<string | null>(null);
+  const [textureOpacity, setTextureOpacity] = useState(1.0);
+  const [showTextureControls, setShowTextureControls] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   const threeOverlayRef = useRef<ThreeNailOverlay | null>(null);
   const threeContainerRef = useRef<HTMLDivElement>(null);
 
@@ -173,6 +179,48 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     },
     [] // Removed smoothingWindowSize from dependencies as it's constant
   );
+
+  // Handle image upload for nail texture
+  const handleTextureUpload = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      if (file) {
+        // Validate file type
+        if (!file.type.startsWith("image/")) {
+          alert("Please select a valid image file.");
+          return;
+        }
+
+        // Validate file size (max 5MB)
+        if (file.size > 5 * 1024 * 1024) {
+          alert("Image file size must be less than 5MB.");
+          return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const base64 = e.target?.result as string;
+          setUploadedTexture(base64);
+          console.log("Nail texture uploaded successfully");
+        };
+        reader.onerror = () => {
+          console.error("Error reading uploaded file");
+          alert("Error reading uploaded file. Please try again.");
+        };
+        reader.readAsDataURL(file);
+      }
+    },
+    []
+  );
+
+  // Remove uploaded texture
+  const removeTexture = useCallback(() => {
+    setUploadedTexture(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+    console.log("Nail texture removed");
+  }, []);
 
   // Helper function to check if we have synchronized results for matching
   const trySyncMatchUpdate = useCallback(() => {
@@ -889,6 +937,9 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
           enable3DRotation: enable3DRotation,
           nailCurvature: nail3DCurvature,
           nailColor: { r: 255, g: 107, b: 157 }, // Default pink color
+          // Texture settings
+          nailTexture: uploadedTexture,
+          textureOpacity: textureOpacity,
           // Debug rotation controls
           rotationDebugMode,
           debugAxisMappingX,
@@ -953,6 +1004,9 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
         enable3DRotation: enable3DRotation,
         nailCurvature: nail3DCurvature,
         nailColor: { r: 255, g: 107, b: 157 }, // Default pink color
+        // Texture settings
+        nailTexture: uploadedTexture,
+        textureOpacity: textureOpacity,
         // Debug rotation controls
         rotationDebugMode,
         debugAxisMappingX,
@@ -982,12 +1036,21 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     preRotationY,
     preRotationZ,
     debugMirrorCorrection,
+    uploadedTexture,
+    textureOpacity,
   ]);
 
   // Handle 3D overlay setting changes
   useEffect(() => {
     updateThreeOverlayConfig();
   }, [updateThreeOverlayConfig]);
+
+  // Handle texture updates separately to avoid re-initializing the entire overlay
+  useEffect(() => {
+    if (threeOverlayRef.current && uploadedTexture !== undefined) {
+      threeOverlayRef.current.setTexture(uploadedTexture);
+    }
+  }, [uploadedTexture]);
 
   return (
     <div className="w-full max-w-4xl">
@@ -1296,7 +1359,95 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
             >
               {rotationDebugMode ? "🔧 Debug ON" : "🔧 Debug"}
             </button>
+
+            {/* Texture Controls Toggle */}
+            <button
+              onClick={() => {
+                setShowTextureControls(!showTextureControls);
+              }}
+              className={`px-3 py-2 rounded-lg font-medium transition-colors ${
+                showTextureControls
+                  ? "bg-white border-2 border-purple-500 text-purple-700"
+                  : "bg-purple-100 text-purple-700 hover:bg-purple-200"
+              }`}
+            >
+              {uploadedTexture ? "🖼️ Texture ON" : "🖼️ Add Texture"}
+            </button>
           </div>
+
+          {/* Texture Upload Controls */}
+          {showTextureControls && (
+            <div className="mt-4 p-4 bg-purple-50 border border-purple-200 rounded-lg">
+              <h3 className="text-sm font-bold text-purple-800 mb-3">
+                🖼️ Nail Texture Controls
+              </h3>
+
+              <div className="space-y-4">
+                {/* File Upload */}
+                <div>
+                  <label className="block text-sm font-medium text-purple-700 mb-2">
+                    Upload Image Texture
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/*"
+                      onChange={handleTextureUpload}
+                      className="text-sm text-purple-700 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-sm file:font-medium file:bg-purple-100 file:text-purple-700 hover:file:bg-purple-200"
+                    />
+                    {uploadedTexture && (
+                      <button
+                        onClick={removeTexture}
+                        className="px-2 py-1 bg-red-100 text-red-700 rounded text-sm hover:bg-red-200"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                  <div className="text-xs text-purple-600 mt-1">
+                    Supported formats: JPG, PNG, GIF. Max size: 5MB
+                  </div>
+                </div>
+
+                {/* Texture Opacity */}
+                {uploadedTexture && (
+                  <div>
+                    <label className="block text-sm font-medium text-purple-700 mb-2">
+                      Texture Opacity: {Math.round(textureOpacity * 100)}%
+                    </label>
+                    <input
+                      type="range"
+                      min="0.1"
+                      max="1"
+                      step="0.1"
+                      value={textureOpacity}
+                      onChange={(e) =>
+                        setTextureOpacity(parseFloat(e.target.value))
+                      }
+                      className="w-full"
+                    />
+                  </div>
+                )}
+
+                {/* Preview */}
+                {uploadedTexture && (
+                  <div>
+                    <label className="block text-sm font-medium text-purple-700 mb-2">
+                      Texture Preview:
+                    </label>
+                    <div className="w-20 h-20 border border-purple-300 rounded overflow-hidden">
+                      <img
+                        src={uploadedTexture}
+                        alt="Nail texture preview"
+                        className="w-full h-full object-cover"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Debug Rotation Controls */}
           {rotationDebugMode && (
