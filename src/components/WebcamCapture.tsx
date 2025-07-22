@@ -44,7 +44,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   const [nailFingerMatches, setNailFingerMatches] = useState<NailFingerMatch[]>(
     []
   );
-  const [detectionMode, setDetectionMode] = useState<DetectionMode>("both");
+  const detectionMode = "both" as const; // Always use both models
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fps, setFps] = useState(0);
@@ -56,7 +56,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   const lastInferenceTimeRef = useRef<number>(0);
   const syncedDetectionsRef = useRef<YoloDetection[]>([]);
   const syncedHandDetectionsRef = useRef<HandDetection[]>([]);
-  const currentDetectionModeRef = useRef<DetectionMode>(detectionMode);
+  const currentDetectionModeRef = useRef<DetectionMode>("both");
   const lastDrawTimeRef = useRef<number>(0);
   const lastNailInferenceRef = useRef<number>(0);
   const lastHandInferenceRef = useRef<number>(0);
@@ -76,16 +76,16 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   const [showNailFingerMatches, setShowNailFingerMatches] = useState(false);
   const [showHandLandmarks, setShowHandLandmarks] = useState(false);
 
-  // 3D Overlay state and controls
-  const [show3DOverlay, setShow3DOverlay] = useState(true);
-  const [show3DWireframe, setShow3DWireframe] = useState(true); // Default to true to see the fix
-  const [nail3DOpacity, setNail3DOpacity] = useState(0.8);
-  const [nail3DThickness, setNail3DThickness] = useState(8);
-  const [nail3DMetallic, setNail3DMetallic] = useState(0.7);
-  const [nail3DRoughness, setNail3DRoughness] = useState(0.3);
-  const [nail3DCurvature, setNail3DCurvature] = useState(0.5); // Default to a visible curve
-  const [enable3DRotation, setEnable3DRotation] = useState(false);
-  const [enable3DReflections, setEnable3DReflections] = useState(true);
+  // 3D Overlay state and controls - always enabled
+  const show3DOverlay = true; // Always show 3D overlay
+  const [show3DWireframe, setShow3DWireframe] = useState(false); // Default to solid
+  const nail3DOpacity = 0.8; // Fixed reasonable defaults
+  const nail3DThickness = 6;
+  const nail3DMetallic = 0.7;
+  const nail3DRoughness = 0.3;
+  const nail3DCurvature = 0.6;
+  const enable3DRotation = true; // Always enabled
+  const enable3DReflections = true;
   const threeOverlayRef = useRef<ThreeNailOverlay | null>(null);
   const threeContainerRef = useRef<HTMLDivElement>(null);
 
@@ -144,67 +144,6 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       });
     },
     [] // Removed smoothingWindowSize from dependencies as it's constant
-  );
-
-  // Detection mode change handler with cleanup
-  const handleDetectionModeChange = useCallback(
-    (newMode: DetectionMode) => {
-      console.log(
-        `Switching detection mode from ${detectionMode} to ${newMode}`
-      );
-
-      // Clear existing detections when switching modes
-      if (newMode !== detectionMode) {
-        if (newMode === "nails") {
-          // Switching to nails-only: clear hands and matches immediately
-          setHandDetections([]);
-          syncedHandDetectionsRef.current = [];
-          setNailFingerMatches([]);
-          console.log("Cleared hand detections for nails-only mode");
-        } else if (newMode === "hands") {
-          // Switching to hands-only: clear nails and matches immediately
-          setDetections([]);
-          syncedDetectionsRef.current = [];
-          setNailFingerMatches([]);
-          console.log("Cleared nail detections for hands-only mode");
-        } else if (newMode === "both") {
-          // Switching to both: clear matches to recalculate, keep existing detections
-          setNailFingerMatches([]);
-          nailOrientationHistoryRef.current.clear(); // Clear smoothing history
-          console.log("Cleared matches for both mode - will recalculate");
-        }
-      }
-
-      setDetectionMode(newMode);
-      currentDetectionModeRef.current = newMode;
-
-      // Reset inference timing to ensure immediate processing with new mode
-      lastNailInferenceRef.current = 0;
-      lastHandInferenceRef.current = 0;
-      pendingInferenceRef.current = false;
-
-      // Force immediate canvas clearing and redraw with new mode
-      if (canvasRef.current && videoRef.current) {
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          // Clear the canvas
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-          // Draw fresh video frame without any detections
-          const video = videoRef.current;
-          if (video.videoWidth > 0 && video.videoHeight > 0) {
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          }
-        }
-      }
-
-      // Reset drawing time to force immediate redraw
-      lastDrawTimeRef.current = 0;
-
-      console.log(`Mode switch complete. New mode: ${newMode}`);
-    },
-    [detectionMode]
   );
 
   // Load the models
@@ -437,38 +376,22 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
 
     const currentTime = performance.now();
 
-    // Improved timing strategy: separate intervals for different models
+    // Improved timing strategy: run both models with staggered timing
     let shouldRunNails = false;
     let shouldRunHands = false;
 
-    if (detectionMode === "nails" && modelRef.current) {
-      // Nail detection every 600ms for better responsiveness
-      if (currentTime - lastNailInferenceRef.current > 600) {
-        shouldRunNails = true;
-        lastNailInferenceRef.current = currentTime;
-      }
-    } else if (detectionMode === "hands" && handsModelRef.current) {
-      // Hand detection every 500ms for smooth tracking
-      if (currentTime - lastHandInferenceRef.current > 500) {
-        shouldRunHands = true;
-        lastHandInferenceRef.current = currentTime;
-      }
-    } else if (detectionMode === "both") {
-      // Staggered execution: nail detection every 600ms, hand detection every 800ms
-      if (
-        modelRef.current &&
-        currentTime - lastNailInferenceRef.current > 600
-      ) {
-        shouldRunNails = true;
-        lastNailInferenceRef.current = currentTime;
-      }
-      if (
-        handsModelRef.current &&
-        currentTime - lastHandInferenceRef.current > 800
-      ) {
-        shouldRunHands = true;
-        lastHandInferenceRef.current = currentTime;
-      }
+    // Always run both models with staggered execution
+    if (modelRef.current && currentTime - lastNailInferenceRef.current > 600) {
+      shouldRunNails = true;
+      lastNailInferenceRef.current = currentTime;
+    }
+    if (
+      handsModelRef.current &&
+      currentTime - lastHandInferenceRef.current > 800 &&
+      currentTime - lastNailInferenceRef.current > 300 // 300ms offset
+    ) {
+      shouldRunHands = true;
+      lastHandInferenceRef.current = currentTime;
     }
 
     if (!shouldRunNails && !shouldRunHands) {
@@ -556,7 +479,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       setIsProcessing(false);
       pendingInferenceRef.current = false;
     }
-  }, [isProcessing, detectionMode, smoothNailOrientations]);
+  }, [isProcessing, smoothNailOrientations]);
 
   // Optimized drawing with better performance and frame synchronization
   const drawDetections = useCallback(() => {
@@ -588,19 +511,13 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     const scaleX = displayWidth / video.videoWidth;
     const scaleY = displayHeight / video.videoHeight;
 
-    // Use synced detections and filter by current mode
-    const currentDetections =
-      detectionMode === "hands" ? [] : syncedDetectionsRef.current;
-    const currentHandDetections =
-      detectionMode === "nails" ? [] : syncedHandDetectionsRef.current;
-    const currentMatches = detectionMode === "both" ? nailFingerMatches : [];
+    // Use synced detections - always show both
+    const currentDetections = syncedDetectionsRef.current;
+    const currentHandDetections = syncedHandDetectionsRef.current;
+    const currentMatches = nailFingerMatches;
 
     // Apply color filter if enabled (only for nails)
-    if (
-      enableColorFilter &&
-      currentDetections.length > 0 &&
-      (detectionMode === "nails" || detectionMode === "both")
-    ) {
+    if (enableColorFilter && currentDetections.length > 0) {
       // Scale detections to display size
       const scaledDetections = currentDetections.map((detection) => ({
         ...detection,
@@ -621,15 +538,12 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
 
     // Draw nail detection outlines and labels with improved efficiency
     if (
-      (detectionMode === "nails" || detectionMode === "both") &&
       currentDetections.length > 0 &&
       (showNailOutlines || showNailLabels || showConfidenceScores)
     ) {
       // Reduce excessive logging
       if (Math.random() < 0.02) {
-        console.log(
-          `Drawing ${currentDetections.length} nail detections in mode: ${detectionMode}`
-        );
+        console.log(`Drawing ${currentDetections.length} nail detections`);
       }
 
       currentDetections.forEach((detection, index) => {
@@ -744,11 +658,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     }
 
     // Draw hand detections efficiently
-    if (
-      (detectionMode === "hands" || detectionMode === "both") &&
-      currentHandDetections.length > 0 &&
-      showHandLandmarks
-    ) {
+    if (currentHandDetections.length > 0 && showHandLandmarks) {
       drawHandDetections(canvas, currentHandDetections, {
         drawLandmarks: true,
         drawConnections: true,
@@ -760,16 +670,12 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     }
 
     // Draw nail-finger matches if we have both types of detections
-    if (
-      detectionMode === "both" &&
-      currentMatches.length > 0 &&
-      showNailFingerMatches
-    ) {
+    if (currentMatches.length > 0 && showNailFingerMatches) {
       drawNailFingerMatches(ctx, currentMatches, scaleX, scaleY);
     }
 
     // Update 3D overlay if enabled (separate from match visualization)
-    if (show3DOverlay && threeOverlayRef.current && detectionMode === "both") {
+    if (show3DOverlay && threeOverlayRef.current) {
       // Update canvas size if needed
       if (
         canvas.width !== overlayCanvasDimensions.width ||
@@ -792,7 +698,6 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   }, [
     enableColorFilter,
     selectedColor,
-    detectionMode,
     nailFingerMatches,
     show3DOverlay,
     showConfidenceScores,
@@ -821,33 +726,20 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
         lastDrawTimeRef.current = currentTime;
       }
 
-      // Optimized inference timing - different intervals for different modes
+      // Optimized inference timing - both models with staggering
       if (!pendingInferenceRef.current && !isProcessing) {
         let shouldRunInference = false;
 
-        if (detectionMode === "nails" && modelRef.current) {
-          // Nail inference every 600ms for good responsiveness without overloading
-          if (currentTime - lastNailInferenceRef.current >= 600) {
-            shouldRunInference = true;
-          }
-        } else if (detectionMode === "hands" && handsModelRef.current) {
-          // Hand inference every 500ms for smooth tracking
-          if (currentTime - lastHandInferenceRef.current >= 500) {
-            shouldRunInference = true;
-          }
-        } else if (detectionMode === "both") {
-          // For both mode, check if either model is ready with proper staggering
-          const nailReady =
-            modelRef.current &&
-            currentTime - lastNailInferenceRef.current >= 600;
-          const handReady =
-            handsModelRef.current &&
-            currentTime - lastHandInferenceRef.current >= 800 &&
-            currentTime - lastNailInferenceRef.current >= 300; // 300ms offset
+        // For both mode, check if either model is ready with proper staggering
+        const nailReady =
+          modelRef.current && currentTime - lastNailInferenceRef.current >= 600;
+        const handReady =
+          handsModelRef.current &&
+          currentTime - lastHandInferenceRef.current >= 800 &&
+          currentTime - lastNailInferenceRef.current >= 300; // 300ms offset
 
-          if (nailReady || handReady) {
-            shouldRunInference = true;
-          }
+        if (nailReady || handReady) {
+          shouldRunInference = true;
         }
 
         if (shouldRunInference) {
@@ -857,29 +749,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
 
       animationRef.current = requestAnimationFrame(processFrame);
     }
-  }, [
-    isWebcamActive,
-    runInference,
-    drawDetections,
-    isProcessing,
-    detectionMode,
-  ]);
-
-  // Handle detection mode changes
-  useEffect(() => {
-    console.log(`Detection mode changed to: ${detectionMode}`);
-    currentDetectionModeRef.current = detectionMode;
-
-    // Force immediate redraw when mode changes by resetting draw timing
-    lastDrawTimeRef.current = 0;
-
-    // Force a redraw immediately to show the mode change
-    if (isWebcamActive && canvasRef.current && videoRef.current) {
-      setTimeout(() => {
-        drawDetections();
-      }, 50); // Small delay to ensure state has updated
-    }
-  }, [detectionMode, drawDetections, isWebcamActive]);
+  }, [isWebcamActive, runInference, drawDetections, isProcessing]);
 
   // Effects
   useEffect(() => {
@@ -984,7 +854,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
           console.log("3D nail overlay initialized successfully");
         } catch (error) {
           console.error("Failed to initialize 3D overlay:", error);
-          setShow3DOverlay(false);
+          // 3D overlay is always enabled, so just log the error
         }
       } else {
         console.warn("Canvas not ready for 3D overlay initialization");
@@ -1048,16 +918,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
           {/* Single Video Feed with Overlaid Detections */}
           <div className="w-full max-w-2xl">
             <h3 className="text-lg font-semibold mb-4 flex items-center gap-2 justify-center">
-              {detectionMode === "nails"
-                ? "💅"
-                : detectionMode === "hands"
-                ? "👋"
-                : "💅👋"}
-              {detectionMode === "nails"
-                ? "Nail Detection & Analysis"
-                : detectionMode === "hands"
-                ? "Hand Tracking & Analysis"
-                : "Nail & Hand AI Analysis"}
+              💅👋 Nail & Hand AI Analysis
               {fps > 0 && (
                 <span className="text-sm bg-blue-100 text-blue-800 px-2 py-1 rounded">
                   {fps} FPS
@@ -1154,46 +1015,10 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
             {isWebcamActive ? "🛑 Stop Camera" : "📷 Start Camera"}
           </button>
 
-          {/* Detection Mode Toggle */}
-          <div className="flex rounded-lg border border-gray-300 overflow-hidden">
-            {(["nails", "hands", "both"] as DetectionMode[]).map((mode) => (
-              <button
-                key={mode}
-                onClick={() => handleDetectionModeChange(mode)}
-                disabled={
-                  (mode === "nails" && !modelRef.current) ||
-                  (mode === "hands" && !handsModelRef.current) ||
-                  (mode === "both" &&
-                    !modelRef.current &&
-                    !handsModelRef.current)
-                }
-                className={`px-4 py-2 font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                  detectionMode === mode
-                    ? mode === "nails"
-                      ? "bg-pink-500 text-white"
-                      : mode === "hands"
-                      ? "bg-blue-500 text-white"
-                      : "bg-purple-500 text-white"
-                    : "bg-white text-gray-700 hover:bg-gray-50"
-                }`}
-              >
-                {mode === "nails"
-                  ? "💅 Nails"
-                  : mode === "hands"
-                  ? "👋 Hands"
-                  : "💅👋 Both"}
-              </button>
-            ))}
-          </div>
-
           {/* Color Filter Toggle */}
           <button
             onClick={() => setEnableColorFilter(!enableColorFilter)}
-            disabled={
-              !isWebcamActive ||
-              detections.length === 0 ||
-              detectionMode === "hands"
-            }
+            disabled={!isWebcamActive || detections.length === 0}
             className={`px-6 py-2 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
               enableColorFilter
                 ? "bg-purple-500 hover:bg-purple-600 text-white"
@@ -1358,177 +1183,28 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
           )}
 
           {/* 3D Overlay Controls */}
-          {detectionMode === "both" && (
-            <div className="flex flex-wrap items-center gap-2">
-              {/* 3D Overlay Toggle */}
-              <button
-                onClick={() => setShow3DOverlay(!show3DOverlay)}
-                disabled={!isWebcamActive}
-                className={`px-4 py-2 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                  show3DOverlay
-                    ? "bg-cyan-500 hover:bg-cyan-600 text-white"
-                    : "bg-gray-500 hover:bg-gray-600 text-white"
-                }`}
-              >
-                {show3DOverlay ? "🧊 3D Overlay ON" : "🧊 3D Overlay OFF"}
-              </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {nailFingerMatches.length > 0 && (
+              <span className="text-xs text-green-600 bg-green-100 px-2 py-1 rounded">
+                {nailFingerMatches.length} nail
+                {nailFingerMatches.length !== 1 ? "s" : ""} matched
+              </span>
+            )}
 
-              {nailFingerMatches.length > 0 && (
-                <span className="text-xs text-green-600 bg-green-100 px-2 py-1 rounded">
-                  {nailFingerMatches.length} nail
-                  {nailFingerMatches.length !== 1 ? "s" : ""} matched
-                </span>
-              )}
-
-              {/* Wireframe Toggle */}
-              {show3DOverlay && (
-                <button
-                  onClick={() => {
-                    setShow3DWireframe(!show3DWireframe);
-                  }}
-                  className={`px-3 py-2 rounded-lg font-medium transition-colors ${
-                    show3DWireframe
-                      ? "bg-white border-2 border-cyan-500 text-cyan-700"
-                      : "bg-cyan-100 text-cyan-700 hover:bg-cyan-200"
-                  }`}
-                >
-                  {show3DWireframe ? "📐 Wireframe" : "🎯 Solid"}
-                </button>
-              )}
-
-              {/* 3D Controls Panel */}
-              {show3DOverlay && (
-                <div className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2">
-                  {/* Opacity Slider */}
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-600">Opacity:</span>
-                    <input
-                      type="range"
-                      min="0.2"
-                      max="1"
-                      step="0.1"
-                      value={nail3DOpacity}
-                      onChange={(e) => {
-                        const newOpacity = parseFloat(e.target.value);
-                        setNail3DOpacity(newOpacity);
-                      }}
-                      className="w-16"
-                    />
-                    <span className="text-xs text-gray-600 min-w-[30px]">
-                      {Math.round(nail3DOpacity * 100)}%
-                    </span>
-                  </div>
-
-                  {/* Thickness Slider */}
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-600">Thickness:</span>
-                    <input
-                      type="range"
-                      min="2"
-                      max="20"
-                      step="2"
-                      value={nail3DThickness}
-                      onChange={(e) => {
-                        const newThickness = parseInt(e.target.value);
-                        setNail3DThickness(newThickness);
-                      }}
-                      className="w-16"
-                    />
-                    <span className="text-xs text-gray-600 min-w-[20px]">
-                      {nail3DThickness}px
-                    </span>
-                  </div>
-
-                  {/* Metallic Intensity Slider */}
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-600">Metallic:</span>
-                    <input
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.1"
-                      value={nail3DMetallic}
-                      onChange={(e) => {
-                        const newMetallic = parseFloat(e.target.value);
-                        setNail3DMetallic(newMetallic);
-                      }}
-                      className="w-16"
-                    />
-                    <span className="text-xs text-gray-600 min-w-[30px]">
-                      {Math.round(nail3DMetallic * 100)}%
-                    </span>
-                  </div>
-
-                  {/* Roughness Slider */}
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-600">Rough:</span>
-                    <input
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.1"
-                      value={nail3DRoughness}
-                      onChange={(e) => {
-                        const newRoughness = parseFloat(e.target.value);
-                        setNail3DRoughness(newRoughness);
-                      }}
-                      className="w-16"
-                    />
-                    <span className="text-xs text-gray-600 min-w-[30px]">
-                      {Math.round(nail3DRoughness * 100)}%
-                    </span>
-                  </div>
-
-                  {/* Curvature Slider */}
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-600">Curve:</span>
-                    <input
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.1"
-                      value={nail3DCurvature}
-                      onChange={(e) => {
-                        const newCurvature = parseFloat(e.target.value);
-                        setNail3DCurvature(newCurvature);
-                      }}
-                      className="w-16"
-                    />
-                    <span className="text-xs text-gray-600 min-w-[30px]">
-                      {Math.round(nail3DCurvature * 100)}%
-                    </span>
-                  </div>
-
-                  {/* 3D Effect Toggles */}
-                  <div className="flex items-center gap-2">
-                    <label className="flex items-center gap-1 text-xs">
-                      <input
-                        type="checkbox"
-                        checked={enable3DRotation}
-                        onChange={(e) => {
-                          setEnable3DRotation(e.target.checked);
-                        }}
-                        className="rounded text-cyan-500 focus:ring-cyan-500 focus:ring-1"
-                      />
-                      Rotate
-                    </label>
-
-                    <label className="flex items-center gap-1 text-xs">
-                      <input
-                        type="checkbox"
-                        checked={enable3DReflections}
-                        onChange={(e) => {
-                          setEnable3DReflections(e.target.checked);
-                        }}
-                        className="rounded text-cyan-500 focus:ring-cyan-500 focus:ring-1"
-                      />
-                      Reflect
-                    </label>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
+            {/* Wireframe Toggle */}
+            <button
+              onClick={() => {
+                setShow3DWireframe(!show3DWireframe);
+              }}
+              className={`px-3 py-2 rounded-lg font-medium transition-colors ${
+                show3DWireframe
+                  ? "bg-white border-2 border-cyan-500 text-cyan-700"
+                  : "bg-cyan-100 text-cyan-700 hover:bg-cyan-200"
+              }`}
+            >
+              {show3DWireframe ? "📐 Wireframe" : "🎯 Solid"}
+            </button>
+          </div>
 
           {isProcessing && (
             <div className="flex items-center gap-2 text-pink-600">

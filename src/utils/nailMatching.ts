@@ -101,13 +101,15 @@ function calculateOrientationBasis(
   if ([TIP, DIP, basePointIndex].some((i) => !lm[i])) return null;
 
   // Create THREE.Vector3 instances from landmark coordinates for vector operations.
-  const p_tip = new THREE.Vector3(lm[TIP].x, lm[TIP].y, lm[TIP].z);
-  const p_dip = new THREE.Vector3(lm[DIP].x, lm[DIP].y, lm[DIP].z);
-  const p_base = new THREE.Vector3(
-    lm[basePointIndex].x,
-    lm[basePointIndex].y,
-    lm[basePointIndex].z
-  );
+  // **FIX:** Convert MediaPipe's left-handed system (Y-down, Z-out) to a
+  // right-handed system (Y-up, Z-in) immediately. This is critical for
+  // ensuring cross-product calculations are correct.
+  const toVec3 = (p: { x: number; y: number; z: number }) =>
+    new THREE.Vector3(p.x, -p.y, -p.z);
+
+  const p_tip = toVec3(lm[TIP]);
+  const p_dip = toVec3(lm[DIP]);
+  const p_base = toVec3(lm[basePointIndex]);
 
   // --- Determine the 3D axes of the nail ---
 
@@ -125,7 +127,7 @@ function calculateOrientationBasis(
     .normalize();
 
   // MediaPipe's landmark winding order is consistent. For a left hand, the raw
-  // cross product points "into" the finger. We must negate it to ensure the
+  // cross product might point "into" the finger. We negate it to ensure the
   // normal (yAxis) always points "out", away from the nail bed.
   if (hand.handedness === "Left") {
     yAxis.negate();
@@ -156,17 +158,18 @@ function calculateNailDimensions(
   detection: YoloDetection,
   orientation: NailFingerMatch["orientation"]
 ): { width: number; height: number; angle: number } {
-  // Project 3D axes to 2D plane for dimension/angle calculation
+  // **FIX:** The orientation vectors are now in a Y-up coordinate system. To project them
+  // onto the 2D canvas (which is Y-down), we must negate their Y components.
   const zAxis2D = new THREE.Vector2(
     orientation.zAxis[0],
-    orientation.zAxis[1]
+    -orientation.zAxis[1]
   ).normalize();
   const xAxis2D = new THREE.Vector2(
     orientation.xAxis[0],
-    orientation.xAxis[1]
+    -orientation.xAxis[1]
   ).normalize();
 
-  // The 2D angle of the nail is the angle of its length vector (z-axis).
+  // The 2D angle of the nail is the angle of its length vector (z-axis) in Y-down space.
   // This is used for simple 2D overlays.
   const angle = Math.atan2(zAxis2D.y, zAxis2D.x);
 

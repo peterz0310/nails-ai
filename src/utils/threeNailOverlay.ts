@@ -201,10 +201,12 @@ export class ThreeNailOverlay {
     if (this.config.enable3DRotation && match.orientation) {
       const { xAxis, yAxis, zAxis } = match.orientation;
 
-      // Convert MediaPipe coords (Y-down) to Three.js coords (Y-up)
-      const threeX = new THREE.Vector3(xAxis[0], -xAxis[1], xAxis[2]); // Width
-      const threeY = new THREE.Vector3(yAxis[0], -yAxis[1], yAxis[2]); // Normal
-      const threeZ = new THREE.Vector3(zAxis[0], -zAxis[1], zAxis[2]); // Length
+      // **FIX:** The orientation vectors from `nailMatching` are now pre-converted
+      // into a right-handed, Y-up coordinate system suitable for Three.js.
+      // No further conversion is needed here.
+      const threeX = new THREE.Vector3().fromArray(xAxis); // Width
+      const threeY = new THREE.Vector3().fromArray(yAxis); // Normal
+      const threeZ = new THREE.Vector3().fromArray(zAxis); // Length
 
       // Our Extruded Geometry is created with:
       // - Local X: Width
@@ -278,7 +280,7 @@ export class ThreeNailOverlay {
     };
 
     const geom = new THREE.ExtrudeGeometry(shape, extrudeSettings);
-    // Center the geometry on its length axis
+    // Center the geometry on its bounding box, which is critical for proper rotation.
     geom.center();
     return geom;
   }
