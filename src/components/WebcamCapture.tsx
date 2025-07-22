@@ -60,6 +60,17 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
   const lastDrawTimeRef = useRef<number>(0);
   const lastNailInferenceRef = useRef<number>(0);
   const lastHandInferenceRef = useRef<number>(0);
+  // Add frame synchronization tracking
+  const capturedFrameRef = useRef<ImageData | null>(null);
+  const frameTimestampRef = useRef<number>(0);
+  const nailResultsRef = useRef<{
+    detections: YoloDetection[];
+    timestamp: number;
+  } | null>(null);
+  const handResultsRef = useRef<{
+    hands: HandDetection[];
+    timestamp: number;
+  } | null>(null);
   const [selectedColor, setSelectedColor] = useState({
     r: 255,
     g: 107,
@@ -146,6 +157,41 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     [] // Removed smoothingWindowSize from dependencies as it's constant
   );
 
+  // Helper function to check if we have synchronized results for matching
+  const trySyncMatchUpdate = useCallback(() => {
+    const nailResults = nailResultsRef.current;
+    const handResults = handResultsRef.current;
+
+    // Only calculate matches if we have recent results from both models
+    // and they're from a similar timeframe (within 500ms)
+    if (
+      nailResults &&
+      handResults &&
+      Math.abs(nailResults.timestamp - handResults.timestamp) < 500 &&
+      nailResults.detections.length > 0 &&
+      handResults.hands.length > 0
+    ) {
+      const video = videoRef.current;
+      if (video && video.videoWidth > 0 && video.videoHeight > 0) {
+        const matches = matchNailsToFingertips(
+          nailResults.detections,
+          handResults.hands,
+          video.videoWidth,
+          video.videoHeight
+        );
+        const smoothedMatches = smoothNailOrientations(matches);
+        setNailFingerMatches(smoothedMatches);
+        console.log(
+          `Synchronized nail-finger matches: ${
+            matches.length
+          } matches from frames ${Math.abs(
+            nailResults.timestamp - handResults.timestamp
+          ).toFixed(0)}ms apart`
+        );
+      }
+    }
+  }, [smoothNailOrientations]);
+
   // Load the models
   const loadModel = useCallback(async () => {
     try {
@@ -218,27 +264,14 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
               setHandDetections(handsResult.hands);
               syncedHandDetectionsRef.current = handsResult.hands;
 
-              // Calculate nail-finger matches if we have both models active and nail detections
-              if (
-                currentMode === "both" &&
-                syncedDetectionsRef.current.length > 0
-              ) {
-                // Get current video dimensions
-                const video = videoRef.current;
-                if (video && video.videoWidth > 0 && video.videoHeight > 0) {
-                  const matches = matchNailsToFingertips(
-                    syncedDetectionsRef.current,
-                    handsResult.hands,
-                    video.videoWidth,
-                    video.videoHeight
-                  );
-                  const smoothedMatches = smoothNailOrientations(matches);
-                  setNailFingerMatches(smoothedMatches);
-                  console.log(
-                    `Updated nail-finger matches from hand detection: ${matches.length} matches found`
-                  );
-                }
-              }
+              // Store hand results with timestamp for synchronized matching
+              handResultsRef.current = {
+                hands: handsResult.hands,
+                timestamp: performance.now(),
+              };
+
+              // Try to update matches with synchronized data
+              trySyncMatchUpdate();
             } else {
               // More conservative clearing - only clear when no hands detected for current mode
               if (currentMode === "hands") {
@@ -249,6 +282,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
                 // In both mode, clear hand detections but keep nail detections
                 setHandDetections([]);
                 syncedHandDetectionsRef.current = [];
+                handResultsRef.current = null; // Clear stored hand results
                 setNailFingerMatches([]); // Clear matches since hands are gone
                 console.log(
                   "No hands detected in both mode - cleared hand detections and matches"
@@ -286,7 +320,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       );
       onModelLoaded(false);
     }
-  }, [onModelLoaded, smoothNailOrientations]);
+  }, [onModelLoaded, smoothNailOrientations, trySyncMatchUpdate]);
 
   // Initialize webcam
   const startWebcam = useCallback(async () => {
@@ -326,6 +360,10 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
     nailOrientationHistoryRef.current.clear(); // Clear smoothing history
     syncedDetectionsRef.current = []; // Clear synced detections too
     syncedHandDetectionsRef.current = []; // Clear synced hand detections
+    nailResultsRef.current = null; // Clear stored nail results
+    handResultsRef.current = null; // Clear stored hand results
+    capturedFrameRef.current = null; // Clear captured frame
+    frameTimestampRef.current = 0; // Reset frame timestamp
     pendingInferenceRef.current = false; // Reset pending state
 
     // Clean up timing references
@@ -376,22 +414,27 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
 
     const currentTime = performance.now();
 
-    // Improved timing strategy: run both models with staggered timing
+    // Synchronized timing strategy: run both models together but at a slower rate
+    // for better frame synchronization and accuracy
     let shouldRunNails = false;
     let shouldRunHands = false;
 
-    // Always run both models with staggered execution
-    if (modelRef.current && currentTime - lastNailInferenceRef.current > 600) {
-      shouldRunNails = true;
-      lastNailInferenceRef.current = currentTime;
-    }
-    if (
-      handsModelRef.current &&
-      currentTime - lastHandInferenceRef.current > 800 &&
-      currentTime - lastNailInferenceRef.current > 300 // 300ms offset
-    ) {
-      shouldRunHands = true;
-      lastHandInferenceRef.current = currentTime;
+    // Run both models together every 800ms for better synchronization
+    const inferenceInterval = 800; // Slower but more synchronized
+    const timeSinceLastInference = Math.min(
+      currentTime - lastNailInferenceRef.current,
+      currentTime - lastHandInferenceRef.current
+    );
+
+    if (timeSinceLastInference >= inferenceInterval) {
+      if (modelRef.current) {
+        shouldRunNails = true;
+        lastNailInferenceRef.current = currentTime;
+      }
+      if (handsModelRef.current) {
+        shouldRunHands = true;
+        lastHandInferenceRef.current = currentTime;
+      }
     }
 
     if (!shouldRunNails && !shouldRunHands) {
@@ -427,21 +470,14 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
             setDetections(result.detections);
             syncedDetectionsRef.current = result.detections;
 
-            // Calculate nail-finger matches if we have both models active
-            if (
-              currentDetectionModeRef.current === "both" &&
-              syncedHandDetectionsRef.current.length > 0 &&
-              result.detections.length > 0
-            ) {
-              const matches = matchNailsToFingertips(
-                result.detections,
-                syncedHandDetectionsRef.current,
-                videoWidth,
-                videoHeight
-              );
-              const smoothedMatches = smoothNailOrientations(matches);
-              setNailFingerMatches(smoothedMatches);
-            }
+            // Store nail results with timestamp for synchronized matching
+            nailResultsRef.current = {
+              detections: result.detections,
+              timestamp: performance.now(),
+            };
+
+            // Try to update matches with synchronized data
+            trySyncMatchUpdate();
           }
 
           // Clean up tensors explicitly
@@ -479,7 +515,7 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
       setIsProcessing(false);
       pendingInferenceRef.current = false;
     }
-  }, [isProcessing, smoothNailOrientations]);
+  }, [isProcessing, smoothNailOrientations, trySyncMatchUpdate]);
 
   // Optimized drawing with better performance and frame synchronization
   const drawDetections = useCallback(() => {
@@ -726,23 +762,16 @@ const WebcamCapture: React.FC<WebcamCaptureProps> = ({ onModelLoaded }) => {
         lastDrawTimeRef.current = currentTime;
       }
 
-      // Optimized inference timing - both models with staggering
+      // Synchronized inference timing - both models together for better frame accuracy
       if (!pendingInferenceRef.current && !isProcessing) {
-        let shouldRunInference = false;
+        // Use the same synchronized timing as in runInference
+        const inferenceInterval = 800; // Slower but more synchronized
+        const timeSinceLastInference = Math.min(
+          currentTime - lastNailInferenceRef.current,
+          currentTime - lastHandInferenceRef.current
+        );
 
-        // For both mode, check if either model is ready with proper staggering
-        const nailReady =
-          modelRef.current && currentTime - lastNailInferenceRef.current >= 600;
-        const handReady =
-          handsModelRef.current &&
-          currentTime - lastHandInferenceRef.current >= 800 &&
-          currentTime - lastNailInferenceRef.current >= 300; // 300ms offset
-
-        if (nailReady || handReady) {
-          shouldRunInference = true;
-        }
-
-        if (shouldRunInference) {
+        if (timeSinceLastInference >= inferenceInterval) {
           runInference();
         }
       }
