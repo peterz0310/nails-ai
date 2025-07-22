@@ -84,6 +84,8 @@ function calculateNailCentroid(detection: YoloDetection): [number, number] {
 /**
  * FIXED: This is the core logic for calculating a stable 3D orientation basis.
  * It uses the hand's own geometry to create a robust coordinate system for the nail.
+ * The previous method was unstable when fingers were held straight. This version uses
+ * a stable plane from the palm (wrist, index MCP, pinky MCP) to find the normal vector.
  */
 function calculateOrientationBasis(
   hand: HandDetection,
@@ -93,56 +95,78 @@ function calculateOrientationBasis(
   const indices = getFingerLandmarkIndices(tipIndex);
   if (!indices) return null;
 
-  const { TIP, DIP, PIP, MCP } = indices;
-  // Use MCP for thumb's base to get a more stable Z-axis
-  const basePointIndex = tipIndex === FINGER_LANDMARKS.THUMB.TIP ? MCP : PIP;
+  const { TIP, PIP, MCP } = indices;
+  // Ensure all required landmarks are present for the calculation.
+  const requiredLandmarks = [
+    TIP,
+    PIP,
+    MCP,
+    0, // Wrist
+    5, // Index Finger MCP
+    17, // Pinky Finger MCP
+  ];
+  if (requiredLandmarks.some((i) => !lm[i])) return null;
 
-  // Safety check: ensure all required landmark points exist.
-  if ([TIP, DIP, basePointIndex].some((i) => !lm[i])) return null;
-
-  // Create THREE.Vector3 instances from landmark coordinates for vector operations.
-  // **FIX:** Convert MediaPipe's left-handed system (Y-down, Z-out) to a
-  // right-handed system (Y-up, Z-in) immediately. This is critical for
-  // ensuring cross-product calculations are correct.
+  // Convert MediaPipe's left-handed, Y-down system to a right-handed, Y-up system
+  // immediately. This is crucial for correct vector math in Three.js.
   const toVec3 = (p: { x: number; y: number; z: number }) =>
     new THREE.Vector3(p.x, -p.y, -p.z);
 
+  // --- 1. Determine Primary Finger Direction (Initial Z-Axis) ---
+  // This vector points along the length of the finger and is generally stable.
   const p_tip = toVec3(lm[TIP]);
-  const p_dip = toVec3(lm[DIP]);
-  const p_base = toVec3(lm[basePointIndex]);
-
-  // --- Determine the 3D axes of the nail ---
-
-  // 1. The z-axis (length) points along the finger's direction.
-  //    We use the vector from a base joint to the tip for a stable direction.
+  const p_base = toVec3(
+    lm[tipIndex === FINGER_LANDMARKS.THUMB.TIP ? MCP : PIP]
+  );
   const zAxis = new THREE.Vector3().subVectors(p_tip, p_base).normalize();
 
-  // 2. The y-axis (normal) points "out" from the nail surface.
-  //    We find it using the cross product of two vectors along the finger's surface plane.
-  //    This creates a vector perpendicular to the plane of the finger tip.
-  const v_base_dip = new THREE.Vector3().subVectors(p_dip, p_base);
-  const v_dip_tip = new THREE.Vector3().subVectors(p_tip, p_dip);
+  // --- 2. Determine Stable Hand Normal (Initial Y-Axis) ---
+  // We use the plane of the palm, defined by the wrist and two MCP joints.
+  // This is far more stable than using joints of a single finger, which can be collinear.
+  const p_wrist = toVec3(lm[0]);
+  const p_index_mcp = toVec3(lm[5]);
+  const p_pinky_mcp = toVec3(lm[17]);
+
+  const v_wrist_index = new THREE.Vector3().subVectors(p_index_mcp, p_wrist);
+  const v_wrist_pinky = new THREE.Vector3().subVectors(p_pinky_mcp, p_wrist);
+
+  // The cross product gives a vector normal to the palm.
+  // The winding order of landmarks is consistent, but a left hand is a mirror
+  // of a right hand, so its normal will point the opposite way. We must correct for this.
   const yAxis = new THREE.Vector3()
-    .crossVectors(v_base_dip, v_dip_tip)
+    .crossVectors(v_wrist_index, v_wrist_pinky)
     .normalize();
 
-  // MediaPipe's landmark winding order is consistent. For a left hand, the raw
-  // cross product might point "into" the finger. We negate it to ensure the
-  // normal (yAxis) always points "out", away from the nail bed.
   if (hand.handedness === "Left") {
     yAxis.negate();
   }
 
-  // 3. The x-axis (width) is perpendicular to both the normal (y) and length (z) axes.
-  //    We find it with another cross product to form a right-handed coordinate system.
-  //    Order (y, z) is important here for a right-handed system (X = Y x Z).
+  // --- 3. Create a Final, Perfectly Orthogonal Basis ---
+  // We use the stable `yAxis` (normal) as our reference and build the other
+  // two axes from it to guarantee an orthogonal system (Gram-Schmidt process).
+
+  // The `xAxis` (width) must be perpendicular to both the hand normal and the finger direction.
   const xAxis = new THREE.Vector3().crossVectors(yAxis, zAxis).normalize();
 
-  // 4. (CRUCIAL) Gram-Schmidt Orthogonalization:
-  //    To ensure the basis is perfectly orthogonal (no skew), we recalculate the z-axis
-  //    from the new x and y axes. This corrects for any minor non-orthogonality from
-  //    the landmark data.
+  // We recalculate the `zAxis` to be perfectly orthogonal to the new `xAxis` and the `yAxis`.
+  // This preserves the hand normal and width direction, adjusting the finger length
+  // axis slightly to create a perfect right-handed coordinate system.
   zAxis.crossVectors(xAxis, yAxis).normalize();
+
+  // Final check for NaN values in case of degenerate vectors
+  if (
+    isNaN(xAxis.x) ||
+    isNaN(xAxis.y) ||
+    isNaN(xAxis.z) ||
+    isNaN(yAxis.x) ||
+    isNaN(yAxis.y) ||
+    isNaN(yAxis.z) ||
+    isNaN(zAxis.x) ||
+    isNaN(zAxis.y) ||
+    isNaN(zAxis.z)
+  ) {
+    return null; // Return null if orientation is invalid
+  }
 
   return {
     xAxis: xAxis.toArray() as [number, number, number],
