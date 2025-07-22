@@ -41,16 +41,6 @@ export interface ThreeNailOverlayConfig {
   // Image texture support
   nailTexture?: string | null; // Base64 or URL of uploaded image
   textureOpacity?: number; // Opacity of the texture overlay
-  // Debug rotation controls
-  rotationDebugMode?: boolean;
-  debugAxisMappingX?: "threeX" | "threeY" | "threeZ";
-  debugAxisMappingY?: "threeX" | "threeY" | "threeZ";
-  debugAxisMappingZ?: "threeX" | "threeY" | "threeZ";
-  preRotationX?: number;
-  preRotationY?: number;
-  preRotationZ?: number;
-  // Mirror correction for camera feed
-  debugMirrorCorrection?: boolean;
 }
 
 export class ThreeNailOverlay {
@@ -468,60 +458,21 @@ export class ThreeNailOverlay {
       let threeY = new THREE.Vector3().fromArray(yAxis); // Normal
       let threeZ = new THREE.Vector3().fromArray(zAxis); // Length
 
-      // **MIRROR CORRECTION:** Handle coordinate system handedness from mirrored camera
-      if (this.config.debugMirrorCorrection) {
-        // When camera is mirrored, we need to flip the X-axis to convert from
-        // left-handed (mirrored camera) to right-handed (Three.js) coordinate system
-        threeX.negate();
-        // Also negate Z-axis to maintain proper handedness
-        threeZ.negate();
-      }
+      // Use the working debug defaults as the standard mapping:
+      // debugAxisMappingX = "threeZ" (Local X → threeZ)
+      // debugAxisMappingY = "threeX" (Local Y → threeX)
+      // debugAxisMappingZ = "threeY" (Local Z → threeY)
+      const mappedX = threeZ; // Map Local X to threeZ
+      const mappedY = threeX; // Map Local Y to threeX
+      const mappedZ = threeY; // Map Local Z to threeY
 
-      if (this.config.rotationDebugMode) {
-        // **DEBUG MODE:** Use manual axis mapping and pre-rotations
-        const axisMap = {
-          threeX,
-          threeY,
-          threeZ,
-        };
+      const rotationMatrix = new THREE.Matrix4().makeBasis(
+        mappedX, // Map Local X to chosen world axis
+        mappedY, // Map Local Y to chosen world axis
+        mappedZ // Map Local Z to chosen world axis
+      );
 
-        // Apply manual axis mapping
-        const mappedX = axisMap[this.config.debugAxisMappingX || "threeX"];
-        const mappedY = axisMap[this.config.debugAxisMappingY || "threeZ"];
-        const mappedZ = axisMap[this.config.debugAxisMappingZ || "threeY"];
-
-        const rotationMatrix = new THREE.Matrix4().makeBasis(
-          mappedX, // Map Local X to chosen world axis
-          mappedY, // Map Local Y to chosen world axis
-          mappedZ // Map Local Z to chosen world axis
-        );
-
-        mesh.quaternion.setFromRotationMatrix(rotationMatrix);
-
-        // Apply additional pre-rotation for debugging
-        const preRotation = new THREE.Euler(
-          this.config.preRotationX || 0,
-          this.config.preRotationY || 0,
-          this.config.preRotationZ || 0
-        );
-        const preQuaternion = new THREE.Quaternion().setFromEuler(preRotation);
-        mesh.quaternion.premultiply(preQuaternion);
-      } else {
-        // **ORIGINAL LOGIC:** Use the fixed mapping
-        // After rotating the ExtrudeGeometry -90° around X, our geometry now has:
-        // - Local X: Width (across nail)
-        // - Local Y: Length (along finger, was Z before rotation)
-        // - Local Z: Thickness/Normal (pointing out from nail surface, was Y before rotation)
-        //
-        // Map to world axes:
-        const rotationMatrix = new THREE.Matrix4().makeBasis(
-          threeX, // Map Local X to World X (Width)
-          threeZ, // Map Local Y to World Z (Length)
-          threeY // Map Local Z to World Y (Normal)
-        );
-
-        mesh.quaternion.setFromRotationMatrix(rotationMatrix);
-      }
+      mesh.quaternion.setFromRotationMatrix(rotationMatrix);
     } else {
       // Fallback to simple 2D rotation
       // Reset 3D rotation and apply only 2D rotation around the screen's Z-axis.
@@ -583,21 +534,14 @@ export class ThreeNailOverlay {
 
     const geom = new THREE.ExtrudeGeometry(shape, extrudeSettings);
 
-    if (!this.config.rotationDebugMode) {
-      // **ORIGINAL:** Apply the -90° X rotation when not in debug mode
-      // ExtrudeGeometry creates geometry with:
-      // - X: width (correct for nail width)
-      // - Y: curvature/thickness (normal direction, pointing up from nail surface)
-      // - Z: length (extrusion depth along finger length)
-      //
-      // We want the nail to lie flat by default, with:
-      // - X: width (across nail)
-      // - Y: length (along finger)
-      // - Z: thickness (normal from surface)
-      //
-      // So we rotate the extruded geometry 90 degrees around X axis
-      geom.rotateX(-Math.PI / 2);
-    }
+    // **GEOMETRY ORIENTATION:** Don't apply the -90° X rotation that was used in the original logic.
+    // The debug mode (which worked correctly) skipped this rotation, so we do the same.
+    // ExtrudeGeometry creates geometry with:
+    // - X: width (correct for nail width)
+    // - Y: curvature/thickness (normal direction, pointing up from nail surface)
+    // - Z: length (extrusion depth along finger length)
+    //
+    // We keep this original orientation and handle the mapping in applyNailRotation() instead.
 
     // Center the geometry on its bounding box, which is critical for proper rotation.
     geom.center();
